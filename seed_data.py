@@ -1,0 +1,127 @@
+import asyncio
+import logging
+from app.core.config import settings
+from app.infrastructure.database.mongodb import db, connect_to_mongo, close_mongo_connection
+from app.dependencies.db_repos import get_auth_use_cases, get_ward_use_cases
+from app.application.dto.auth_dto import HospitalRegisterDTO, DonorRegisterDTO
+from app.application.dto.ward_dto import WardMemberRegisterDTO
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("Seeder")
+
+async def seed():
+    logger.info("Connecting to MongoDB...")
+    await connect_to_mongo()
+    
+    auth_use_cases = get_auth_use_cases()
+    ward_use_cases = get_ward_use_cases()
+    
+    # 1. Create Ward if not exists
+    logger.info("Seeding Ward...")
+    ward_num = "12"
+    existing_ward = await db.db.wards.find_one({"ward_number": ward_num})
+    if not existing_ward:
+        ward_doc = {
+            "ward_number": ward_num,
+            "local_body_name": "Kochi Municipal Corporation",
+            "local_body_type": "corporation",
+            "district": "Ernakulam",
+            "state": "Kerala",
+            "location": {
+                "type": "Point",
+                "coordinates": [76.267304, 9.981636]
+            }
+        }
+        res = await db.db.wards.insert_one(ward_doc)
+        ward_id = str(res.inserted_id)
+        logger.info(f"Created ward with ID: {ward_id}")
+    else:
+        ward_id = str(existing_ward["_id"])
+        logger.info(f"Ward already exists with ID: {ward_id}")
+
+    # 2. Seed Hospital
+    hospital_email = "test_hospital@betterhand.org"
+    existing_hospital = await db.db.users.find_one({"email": hospital_email})
+    if not existing_hospital:
+        logger.info("Registering test hospital...")
+        h_dto = HospitalRegisterDTO(
+            email=hospital_email,
+            password="securepassword123",
+            name="General Hospital Kochi",
+            registration_number="GH-12345",
+            phone="+919876543210",
+            address="Kochi Main Road",
+            city="Kochi",
+            state="Kerala",
+            district="Ernakulam",
+            local_body_type="corporation",
+            local_body_name="Kochi Corporation",
+            ward_number="5",
+            pincode="682011",
+            latitude=9.981636,
+            longitude=76.267304,
+            whatsapp_number="+919876543210"
+        )
+        await auth_use_cases.register_hospital(h_dto)
+        logger.info(f"Registered hospital user: {hospital_email} with password: securepassword123")
+    else:
+        logger.info(f"Hospital {hospital_email} already exists.")
+
+    # 3. Seed Donor
+    donor_email = "donor_a@gmail.com"
+    existing_donor = await db.db.users.find_one({"email": donor_email})
+    if not existing_donor:
+        logger.info("Registering test donor...")
+        d_dto = DonorRegisterDTO(
+            email=donor_email,
+            password="donorpassword123",
+            full_name="Donor A (Near)",
+            blood_group="O+",
+            phone="+919988776655",
+            age=25,
+            gender="M",
+            address="Sub-street Kochi",
+            state="Kerala",
+            district="Ernakulam",
+            local_body_type="corporation",
+            local_body_name="Kochi Corporation",
+            ward_number="5",
+            city="Kochi",
+            pincode="682011",
+            latitude=9.982000,
+            longitude=76.267400,
+            whatsapp_number="+919988776655"
+        )
+        await auth_use_cases.register_donor(d_dto)
+        logger.info(f"Registered donor user: {donor_email} with password: donorpassword123")
+    else:
+        logger.info(f"Donor {donor_email} already exists.")
+
+    # 4. Seed Ward Member
+    ward_email = "ward_member@gmail.com"
+    existing_ward_user = await db.db.users.find_one({"email": ward_email})
+    if not existing_ward_user:
+        logger.info("Registering test ward member...")
+        w_dto = WardMemberRegisterDTO(
+            email=ward_email,
+            password="wardpassword123",
+            full_name="Ward Member A",
+            phone="+919998887776",
+            designation="Councillor",
+            ward_id=ward_id,
+            state="Kerala",
+            district="Ernakulam",
+            local_body_type="corporation",
+            local_body_name="Kochi Corporation",
+            ward_number="12"
+        )
+        await ward_use_cases.register_ward_member(w_dto)
+        logger.info(f"Registered ward member: {ward_email} with password: wardpassword123")
+    else:
+        logger.info(f"Ward member {ward_email} already exists.")
+
+    await close_mongo_connection()
+    logger.info("Database seeding complete!")
+
+if __name__ == "__main__":
+    asyncio.run(seed())
