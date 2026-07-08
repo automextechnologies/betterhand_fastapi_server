@@ -59,7 +59,12 @@ def send_push_notification(fcm_token: str, title: str, body: str, data: dict = N
             notification=messaging.Notification(title=title, body=body),
             data={str(k): str(v) for k, v in (data or {}).items()},
             token=fcm_token,
-            android=messaging.AndroidConfig(priority="high"),
+            android=messaging.AndroidConfig(
+                priority="high",
+                notification=messaging.AndroidNotification(
+                    channel_id="default"
+                )
+            ),
         )
         response = messaging.send(message)
         logger.info(f"FCM sent: {response}")
@@ -85,7 +90,12 @@ def send_push_to_many(fcm_tokens: list[str], title: str, body: str, data: dict =
                 notification=messaging.Notification(title=title, body=body),
                 data={str(k): str(v) for k, v in (data or {}).items()},
                 token=token,
-                android=messaging.AndroidConfig(priority="high"),
+                android=messaging.AndroidConfig(
+                    priority="high",
+                    notification=messaging.AndroidNotification(
+                        channel_id="default"
+                    )
+                ),
             )
             for token in tokens
         ]
