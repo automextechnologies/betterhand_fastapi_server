@@ -32,11 +32,11 @@ app = FastAPI(
 )
 
 # CORS middleware configuration
-# Using allow_origin_regex to match local React/React Native, staging, and preview origins
+# Allowing all origins and IPs for public API access
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex="https?://.*",
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"]
 )
