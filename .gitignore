@@ -1,2 +1,6 @@
 .env
 venv
+firebase-credentials.json
+__pycache__/
+*.pyc
+test_bystander_temp.py

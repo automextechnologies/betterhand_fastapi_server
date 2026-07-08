@@ -90,6 +90,8 @@ class DonationUseCases:
             patient_bed=dto.patient_bed or "",
             ward_contact_person=dto.ward_contact_person or "",
             ward_contact_phone=dto.ward_contact_phone or "",
+            bystander_name=dto.bystander_name or "",
+            bystander_phone=dto.bystander_phone or "",
             patient_state=dto.patient_state or "",
             patient_district=dto.patient_district or "",
             patient_local_body_type=dto.patient_local_body_type or "",

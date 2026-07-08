@@ -26,6 +26,8 @@ class BloodRequestCreateDTO(BaseModel):
     patient_bed: Optional[str] = ""
     ward_contact_person: Optional[str] = ""
     ward_contact_phone: Optional[str] = ""
+    bystander_name: Optional[str] = ""
+    bystander_phone: Optional[str] = ""
     patient_state: Optional[str] = ""
     patient_district: Optional[str] = ""
     patient_local_body_type: Optional[str] = ""
@@ -53,6 +55,8 @@ class BloodRequestListResponse(BaseModel):
     patient_local_body_type: str
     patient_local_body_name: str
     patient_ward_number: str
+    bystander_name: str = ""
+    bystander_phone: str = ""
     hospital_latitude: Optional[float] = None
     hospital_longitude: Optional[float] = None
     hospital_name: str

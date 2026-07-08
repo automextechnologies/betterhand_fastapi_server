@@ -252,6 +252,11 @@ class MongoUserRepository(UserRepository):
         result = await db.db.users.delete_one({"_id": ObjectId(user_id)})
         return result.deleted_count > 0
 
+    async def get_by_role(self, role: str) -> List[User]:
+        cursor = db.db.users.find({"role": role})
+        docs = await cursor.to_list(length=1000)
+        return [map_user_to_entity(doc) for doc in docs]
+
 
 class MongoHospitalProfileRepository(HospitalProfileRepository):
     async def get_by_id(self, profile_id: str) -> Optional[HospitalProfile]:
@@ -336,7 +341,10 @@ class MongoDonorProfileRepository(DonorProfileRepository):
         query = {
             "blood_group": blood_group,
             "is_available": True,
-            "location": {
+        }
+        
+        if radius_km > 0 and longitude is not None and latitude is not None:
+            query["location"] = {
                 "$nearSphere": {
                     "$geometry": {
                         "type": "Point",
@@ -345,7 +353,6 @@ class MongoDonorProfileRepository(DonorProfileRepository):
                     "$maxDistance": float(radius_km) * 1000 # maxDistance is in meters for $nearSphere GeoJSON Point
                 }
             }
-        }
         
         if excluded_donor_ids:
             query["user_id"] = {"$nin": excluded_donor_ids}

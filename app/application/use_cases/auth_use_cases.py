@@ -147,3 +147,17 @@ class AuthUseCases:
             raise ValueError("User not found.")
         user.fcm_token = fcm_token
         await self.user_repo.update(user)
+
+    async def send_test_notification(self) -> dict:
+        donors = await self.user_repo.get_by_role("donor")
+        tokens = [d.fcm_token for d in donors if d.fcm_token]
+        if not tokens:
+            return {"sent": 0, "message": "No active donor FCM tokens found."}
+            
+        from app.infrastructure.external_services.firebase_fcm import send_push_to_many
+        send_push_to_many(
+            fcm_tokens=tokens,
+            title="Test Notification",
+            body="This is a test notification from the BetterHand Hospital command."
+        )
+        return {"sent": len(tokens), "message": f"Test notification broadcasted to {len(tokens)} donor(s)."}

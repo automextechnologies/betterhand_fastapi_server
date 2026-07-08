@@ -54,6 +54,8 @@ async def create_request(
             "status": br.status,
             "patient_name": br.patient_name,
             "patient_condition": br.patient_condition,
+            "bystander_name": br.bystander_name,
+            "bystander_phone": br.bystander_phone,
             "created_at": br.created_at.isoformat()
         }
     except ValueError as e:
@@ -76,6 +78,8 @@ async def list_hospital_requests(
             "status": r.status,
             "patient_name": r.patient_name,
             "patient_condition": r.patient_condition,
+            "bystander_name": r.bystander_name,
+            "bystander_phone": r.bystander_phone,
             "created_at": r.created_at
         })
     return results
@@ -108,6 +112,8 @@ async def get_request_detail(
             "patient_bed": r.patient_bed,
             "ward_contact_person": r.ward_contact_person,
             "ward_contact_phone": r.ward_contact_phone,
+            "bystander_name": r.bystander_name,
+            "bystander_phone": r.bystander_phone,
             "hospital_latitude": r.hospital_latitude,
             "hospital_longitude": r.hospital_longitude,
             "created_at": r.created_at,
@@ -223,6 +229,8 @@ async def get_donor_pending_requests(
                 "urgency": br.get("urgency") if br else "normal",
                 "patient_name": br.get("patient_name") if br else "",
                 "patient_condition": br.get("patient_condition") if br else "",
+                "bystander_name": br.get("bystander_name", "") if br else "",
+                "bystander_phone": br.get("bystander_phone", "") if br else "",
                 "hospital_name": hp.get("name") if hp else "Hospital",
                 "hospital_phone": hp.get("phone") if hp else "",
                 "hospital_whatsapp": hp.get("whatsapp_number") if hp else "",
@@ -358,6 +366,8 @@ async def list_donor_responses(
                 "urgency": br.get("urgency") if br else "normal",
                 "patient_name": br.get("patient_name") if br else "",
                 "patient_condition": br.get("patient_condition") if br else "",
+                "bystander_name": br.get("bystander_name", "") if br else "",
+                "bystander_phone": br.get("bystander_phone", "") if br else "",
                 "hospital_name": hp.get("name") if hp else "Hospital",
                 "hospital_phone": hp.get("phone") if hp else "",
                 "hospital_whatsapp": hp.get("whatsapp_number") if hp else "",
@@ -465,6 +475,8 @@ async def get_hospital_dashboard(
                 "status": br.status,
                 "patient_name": br.patient_name,
                 "patient_condition": br.patient_condition,
+                "bystander_name": br.bystander_name,
+                "bystander_phone": br.bystander_phone,
                 "created_at": br.created_at
             },
             "top_3": top_3_list,
@@ -507,6 +519,8 @@ async def get_tv_data(
             "status": br.status,
             "patient_name": br.patient_name,
             "patient_condition": br.patient_condition,
+            "bystander_name": br.bystander_name,
+            "bystander_phone": br.bystander_phone,
             "created_at": br.created_at
         },
         "confirmed_donors": data["confirmed_donors"]

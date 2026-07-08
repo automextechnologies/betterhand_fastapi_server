@@ -13,8 +13,44 @@ async def seed():
     logger.info("Connecting to MongoDB...")
     await connect_to_mongo()
     
-    auth_use_cases = get_auth_use_cases()
-    ward_use_cases = get_ward_use_cases()
+    from app.dependencies.db_repos import (
+        get_user_repository, get_hospital_repository, get_donor_repository,
+        get_ward_repository, get_ward_member_repository, get_ward_alert_repository,
+        get_ward_notif_repository, get_request_repository, get_response_repository,
+        get_record_repository, get_rating_repository, get_badge_repository
+    )
+    from app.application.use_cases.auth_use_cases import AuthUseCases
+    from app.application.use_cases.ward_use_cases import WardUseCases
+    from app.utils.websocket import ws_broadcast
+    
+    user_repo = get_user_repository()
+    hospital_repo = get_hospital_repository()
+    donor_repo = get_donor_repository()
+    ward_repo = get_ward_repository()
+    ward_member_repo = get_ward_member_repository()
+    ward_alert_repo = get_ward_alert_repository()
+    ward_notif_repo = get_ward_notif_repository()
+    request_repo = get_request_repository()
+    response_repo = get_response_repository()
+    record_repo = get_record_repository()
+    rating_repo = get_rating_repository()
+    badge_repo = get_badge_repository()
+    
+    auth_use_cases = AuthUseCases(user_repo, hospital_repo, donor_repo)
+    ward_use_cases = WardUseCases(
+        user_repo=user_repo,
+        donor_repo=donor_repo,
+        ward_repo=ward_repo,
+        ward_member_repo=ward_member_repo,
+        ward_alert_repo=ward_alert_repo,
+        ward_notif_repo=ward_notif_repo,
+        request_repo=request_repo,
+        response_repo=response_repo,
+        record_repo=record_repo,
+        rating_repo=rating_repo,
+        badge_repo=badge_repo,
+        ws_broadcast_func=ws_broadcast
+    )
     
     # 1. Create Ward if not exists
     logger.info("Seeding Ward...")

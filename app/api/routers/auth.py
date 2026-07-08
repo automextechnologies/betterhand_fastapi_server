@@ -281,17 +281,22 @@ async def search_donors(
     donor_repo: DonorProfileRepository = Depends(get_donor_repository)
 ):
     hospital = await hospital_repo.get_by_user_id(current_user.id)
-    if not hospital or hospital.latitude is None or hospital.longitude is None:
+    has_location = hospital and hospital.latitude is not None and hospital.longitude is not None
+    
+    if radius_km > 0 and not has_location:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Hospital location not set.")
         
     from app.core.config import settings
     from datetime import datetime, timedelta
     cooldown_cutoff = (datetime.utcnow() - timedelta(days=settings.DONOR_COOLDOWN_DAYS)).isoformat()
     
+    lon = hospital.longitude if has_location else 0.0
+    lat = hospital.latitude if has_location else 0.0
+    
     donors = await donor_repo.search_donors(
         blood_group=blood_group,
-        longitude=hospital.longitude,
-        latitude=hospital.latitude,
+        longitude=lon,
+        latitude=lat,
         radius_km=radius_km,
         cooldown_cutoff_date=cooldown_cutoff
     )
@@ -300,7 +305,7 @@ async def search_donors(
     from app.domain.services.location import haversine_distance
     for d in donors:
         dist = 0.0
-        if d.latitude is not None and d.longitude is not None:
+        if has_location and d.latitude is not None and d.longitude is not None:
             dist = round(haversine_distance(hospital.latitude, hospital.longitude, d.latitude, d.longitude), 2)
         results.append({
             "id": d.id,
@@ -317,7 +322,7 @@ async def search_donors(
             "distance_km": dist
         })
         
-    # Sort by distance
+    # Sort by distance (donors with location coordinates first)
     results.sort(key=lambda x: x["distance_km"])
     
     return {
@@ -388,3 +393,10 @@ async def submit_questionnaire(
         "questionnaire_completed": True,
         "priority_score": profile.priority_score
     }
+
+@router.post("/test-notification/")
+async def test_notification(
+    current_user: User = Depends(require_hospital),
+    auth_use_cases: AuthUseCases = Depends(get_auth_use_cases)
+):
+    return await auth_use_cases.send_test_notification()

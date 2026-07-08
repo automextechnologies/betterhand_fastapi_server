@@ -9,8 +9,8 @@ from app.core.config import settings
 settings.DB_NAME = "betterhand_db_test"
 
 from app.infrastructure.database.mongodb import db, connect_to_mongo, close_mongo_connection
-from app.dependencies.db_repos import get_auth_use_cases, get_donation_use_cases, get_ward_use_cases
-from app.application.dto.auth_dto import HospitalRegisterDTO, DonorRegisterDTO
+from app.dependencies.db_repos import get_auth_use_cases, get_donation_use_cases, get_ward_use_cases, get_donor_repository
+from app.application.dto.auth_dto import HospitalRegisterDTO, DonorRegisterDTO, UpdateLocationDTO
 from app.application.dto.ward_dto import WardMemberRegisterDTO
 from app.application.dto.donation_dto import BloodRequestCreateDTO, DonationResponseCreateDTO, DonationRecordCreateDTO
 
@@ -30,9 +30,70 @@ async def run_tests():
     await clear_test_db()
     
     # ─── Initialize dependencies ───
-    auth_use_cases = get_auth_use_cases()
-    donation_use_cases = get_donation_use_cases()
-    ward_use_cases = get_ward_use_cases()
+    from app.dependencies.db_repos import (
+        get_user_repository, get_hospital_repository, get_donor_repository,
+        get_ward_repository, get_ward_member_repository, get_ward_alert_repository,
+        get_ward_notif_repository, get_request_repository, get_response_repository,
+        get_record_repository, get_chat_repository, get_rating_repository,
+        get_badge_repository, get_camp_repository, get_camp_reg_repository,
+        get_notif_repository
+    )
+    from app.application.use_cases.auth_use_cases import AuthUseCases
+    from app.application.use_cases.donation_use_cases import DonationUseCases
+    from app.application.use_cases.ward_use_cases import WardUseCases
+    from app.utils.websocket import ws_broadcast
+    
+    user_repo = get_user_repository()
+    hospital_repo = get_hospital_repository()
+    donor_repo = get_donor_repository()
+    ward_repo = get_ward_repository()
+    ward_member_repo = get_ward_member_repository()
+    ward_alert_repo = get_ward_alert_repository()
+    ward_notif_repo = get_ward_notif_repository()
+    request_repo = get_request_repository()
+    response_repo = get_response_repository()
+    record_repo = get_record_repository()
+    chat_repo = get_chat_repository()
+    rating_repo = get_rating_repository()
+    badge_repo = get_badge_repository()
+    camp_repo = get_camp_repository()
+    camp_reg_repo = get_camp_reg_repository()
+    notif_repo = get_notif_repository()
+    
+    auth_use_cases = AuthUseCases(user_repo, hospital_repo, donor_repo)
+    donation_use_cases = DonationUseCases(
+        user_repo=user_repo,
+        hospital_repo=hospital_repo,
+        donor_repo=donor_repo,
+        ward_repo=ward_repo,
+        ward_member_repo=ward_member_repo,
+        ward_alert_repo=ward_alert_repo,
+        ward_notif_repo=ward_notif_repo,
+        request_repo=request_repo,
+        response_repo=response_repo,
+        record_repo=record_repo,
+        chat_repo=chat_repo,
+        rating_repo=rating_repo,
+        badge_repo=badge_repo,
+        camp_repo=camp_repo,
+        camp_reg_repo=camp_reg_repo,
+        notif_repo=notif_repo,
+        ws_broadcast_func=ws_broadcast
+    )
+    ward_use_cases = WardUseCases(
+        user_repo=user_repo,
+        donor_repo=donor_repo,
+        ward_repo=ward_repo,
+        ward_member_repo=ward_member_repo,
+        ward_alert_repo=ward_alert_repo,
+        ward_notif_repo=ward_notif_repo,
+        request_repo=request_repo,
+        response_repo=response_repo,
+        record_repo=record_repo,
+        rating_repo=rating_repo,
+        badge_repo=badge_repo,
+        ws_broadcast_func=ws_broadcast
+    )
     
     try:
         # 1. Create a Test Ward
@@ -69,13 +130,13 @@ async def run_tests():
             ward_number="5",
             pincode="682011",
             latitude=9.981636,
-            longitude=76.267304,
             whatsapp_number="+919876543210"
         )
         h_user = await auth_use_cases.register_hospital(h_dto)
         assert h_user.id is not None
         assert h_user.role == "hospital"
-        logger.info(f"Hospital registered successfully: {h_user.email} (ID: {h_user.id})")
+        await auth_use_cases.update_location(h_user.id, "hospital", UpdateLocationDTO(latitude=9.981636, longitude=76.267304))
+        logger.info(f"Hospital registered successfully: {h_user.email} (ID: {h_user.id}) and coordinates set.")
         
         # 3. Register Near Donor A (O+ blood, within 5 km)
         logger.info("Test Step 3: Registering Near Donor A...")
@@ -95,8 +156,6 @@ async def run_tests():
             ward_number="5",
             city="Kochi",
             pincode="682011",
-            latitude=9.982000,  # ~40 meters away from hospital
-            longitude=76.267400,
             whatsapp_number="+919988776655",
             is_student=False,
             q_weight_ok=True,
@@ -110,7 +169,8 @@ async def run_tests():
         )
         donor_a = await auth_use_cases.register_donor(d_a_dto)
         assert donor_a.id is not None
-        logger.info(f"Donor A registered: {donor_a.email} (ID: {donor_a.id})")
+        await auth_use_cases.update_location(donor_a.id, "donor", UpdateLocationDTO(latitude=9.982000, longitude=76.267400))
+        logger.info(f"Donor A registered: {donor_a.email} (ID: {donor_a.id}) and coordinates set.")
         
         # 4. Register Far Donor B (O+ blood, 15 km away)
         logger.info("Test Step 4: Registering Far Donor B...")
@@ -130,8 +190,6 @@ async def run_tests():
             ward_number="12",
             city="Test Town",
             pincode="682025",
-            latitude=10.150000,  # ~18 km away
-            longitude=76.350000,
             whatsapp_number="+919988776644",
             is_student=False,
             q_weight_ok=True,
@@ -145,7 +203,34 @@ async def run_tests():
         )
         donor_b = await auth_use_cases.register_donor(d_b_dto)
         assert donor_b.id is not None
-        logger.info(f"Donor B registered: {donor_b.email} (ID: {donor_b.id})")
+        await auth_use_cases.update_location(donor_b.id, "donor", UpdateLocationDTO(latitude=10.150000, longitude=76.350000))
+        logger.info(f"Donor B registered: {donor_b.email} (ID: {donor_b.id}) and coordinates set.")
+        
+        # 4b. Test search_donors repository with radius 10 km and radius 0 (All)
+        logger.info("Test Step 4b: Testing search_donors repository with radius 10 km...")
+        donor_repo = get_donor_repository()
+        donors_10k = await donor_repo.search_donors(
+            blood_group="O+",
+            longitude=76.267304,
+            latitude=9.981636,
+            radius_km=10.0
+        )
+        assert len(donors_10k) == 1
+        assert donors_10k[0].user_id == donor_a.id
+        logger.info("Radius 10 km search matched only Donor A (near) correctly.")
+ 
+        logger.info("Testing search_donors repository with radius 0 (All)...")
+        donors_all = await donor_repo.search_donors(
+            blood_group="O+",
+            longitude=76.267304,
+            latitude=9.981636,
+            radius_km=0.0
+        )
+        assert len(donors_all) >= 2
+        donor_ids = [d.user_id for d in donors_all]
+        assert donor_a.id in donor_ids
+        assert donor_b.id in donor_ids
+        logger.info("Radius 0 (All) search matched both Donor A (near) and Donor B (far) successfully!")
         
         # 5. Create Blood Request with 10 km radius (should match only Donor A)
         logger.info("Test Step 5: Creating blood request and matching donors...")
@@ -162,6 +247,8 @@ async def run_tests():
             patient_local_body_type="panchayat",
             patient_local_body_name="Test Panchayat",
             patient_ward_number="12",
+            bystander_name="Jane Bystander",
+            bystander_phone="+918888888888",
             search_radius_km=10,  # 10 km limit
             notify_ward_members=True,
             ward_member_message="Need help mobilization.",
@@ -170,7 +257,9 @@ async def run_tests():
         
         br = await donation_use_cases.create_blood_request(h_user.id, br_dto)
         assert br.id is not None
-        logger.info(f"Blood Request created: ID {br.id}")
+        assert br.bystander_name == "Jane Bystander"
+        assert br.bystander_phone == "+918888888888"
+        logger.info(f"Blood Request created with bystander info: ID {br.id}")
         
         # Trigger background matching
         await donation_use_cases.notify_donors_and_wards_background(br.id)
@@ -201,6 +290,9 @@ async def run_tests():
         # Automatically mark ward member as verified for tests
         await db.db.ward_members.update_one({"user_id": ObjectId(wm_user.id)}, {"$set": {"is_verified": True}})
         logger.info(f"Ward Member registered and verified: {wm_user.email} (ID: {wm_user.id})")
+        
+        # Trigger notification match again to notify the newly registered and verified ward member
+        await donation_use_cases.notify_donors_and_wards_background(br.id)
         
         # 7. Check Ward Alert Broadcast
         logger.info("Test Step 7: Testing alert broadcasting and mobilization...")

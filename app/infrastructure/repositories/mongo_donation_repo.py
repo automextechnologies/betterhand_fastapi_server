@@ -517,6 +517,16 @@ class MongoDonationResponseRepository(DonationResponseRepository):
             if k in ("request_id", "donor_id", "id"):
                 if isinstance(v, list):
                     mongo_query[k if k != "id" else "_id"] = {"$in": [ObjectId(x) for x in v]}
+                elif isinstance(v, dict):
+                    mapped_dict = {}
+                    for op, val in v.items():
+                        if isinstance(val, list):
+                            mapped_dict[op] = [ObjectId(x) if isinstance(x, (str, bytes, ObjectId)) else x for x in val]
+                        elif isinstance(val, (str, bytes)):
+                            mapped_dict[op] = ObjectId(val)
+                        else:
+                            mapped_dict[op] = val
+                    mongo_query[k if k != "id" else "_id"] = mapped_dict
                 else:
                     mongo_query[k if k != "id" else "_id"] = ObjectId(v)
             else:

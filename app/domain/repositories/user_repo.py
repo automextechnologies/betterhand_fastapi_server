@@ -23,6 +23,10 @@ class UserRepository(ABC):
     async def delete(self, user_id: str) -> bool:
         pass
 
+    @abstractmethod
+    async def get_by_role(self, role: str) -> List[User]:
+        pass
+
 
 class HospitalProfileRepository(ABC):
     @abstractmethod

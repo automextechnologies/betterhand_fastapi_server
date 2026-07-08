@@ -254,7 +254,7 @@ class WardUseCases:
                         "ward_member_name": wm.full_name
                     })
                     
-            donor_user = await self.user_repo.get_by_id(donor_id=donor_user_id)
+            donor_user = await self.user_repo.get_by_id(user_id=donor_user_id)
             if donor_user and donor_user.fcm_token:
                 send_push_notification(
                     fcm_token=donor_user.fcm_token,
