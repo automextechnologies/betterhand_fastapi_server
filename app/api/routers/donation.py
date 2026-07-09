@@ -844,22 +844,31 @@ async def clear_hospital_data(
 @router.websocket("/ws/donation/")
 async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(None)):
     if not token:
+        logger.warning("WebSocket connection rejected: No token query parameter provided.")
         await websocket.close(code=4001)
         return
         
     from app.core.security import decode_access_token
     payload = decode_access_token(token)
     if not payload:
+        logger.warning(f"WebSocket connection rejected: Token is invalid, expired, or signature verification failed. Token prefix: {token[:15]}...")
         await websocket.close(code=4001)
         return
         
     user_id = payload.get("sub")
     if not user_id:
+        logger.warning("WebSocket connection rejected: Token payload is missing the 'sub' field.")
         await websocket.close(code=4001)
         return
         
     user_doc = await db.db.users.find_one({"_id": ObjectId(user_id)})
-    if not user_doc or not user_doc.get("is_active"):
+    if not user_doc:
+        logger.warning(f"WebSocket connection rejected: User ID '{user_id}' not found in the database.")
+        await websocket.close(code=4001)
+        return
+        
+    if not user_doc.get("is_active"):
+        logger.warning(f"WebSocket connection rejected: User '{user_id}' is marked as inactive.")
         await websocket.close(code=4001)
         return
         
@@ -871,6 +880,7 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
     elif user_role == "ward_member":
         group_name = f"ward_{user_id}"
     else:
+        logger.warning(f"WebSocket connection rejected: User '{user_id}' has an invalid role '{user_role}'.")
         await websocket.close(code=4001)
         return
         

@@ -10,25 +10,37 @@ def initialize_firebase_app() -> bool:
     from firebase_admin import credentials
     
     if not firebase_admin._apps:
-        # 1. Try to load from environment variable FIREBASE_CREDENTIALS_JSON directly
-        cred_json = os.environ.get("FIREBASE_CREDENTIALS_JSON")
+        # 1. Try to load from FIREBASE_CREDENTIALS_JSON settings/env var directly
+        cred_json = settings.FIREBASE_CREDENTIALS_JSON or os.environ.get("FIREBASE_CREDENTIALS_JSON")
         if cred_json:
             try:
                 cred_info = json.loads(cred_json)
                 cred = credentials.Certificate(cred_info)
                 firebase_admin.initialize_app(cred)
-                logger.info("Firebase Admin successfully initialized from FIREBASE_CREDENTIALS_JSON env var.")
+                logger.info("Firebase Admin successfully initialized from FIREBASE_CREDENTIALS_JSON.")
                 return True
             except Exception as json_err:
                 logger.error(f"Failed to parse or initialize Firebase from FIREBASE_CREDENTIALS_JSON: {json_err}")
         
         # 2. Fallback to path-based configuration
         cred_path = settings.FIREBASE_CREDENTIALS_PATH
-        if not os.path.isabs(cred_path):
+        
+        # Check if the path itself is actually raw JSON content (common in Render environment variables)
+        if cred_path and cred_path.strip().startswith("{"):
+            try:
+                cred_info = json.loads(cred_path)
+                cred = credentials.Certificate(cred_info)
+                firebase_admin.initialize_app(cred)
+                logger.info("Firebase Admin successfully initialized from JSON string in FIREBASE_CREDENTIALS_PATH.")
+                return True
+            except Exception as path_json_err:
+                logger.error(f"FIREBASE_CREDENTIALS_PATH looks like JSON but failed to parse/initialize: {path_json_err}")
+        
+        if cred_path and not os.path.isabs(cred_path):
             base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
             cred_path = os.path.join(base_dir, cred_path)
             
-        if os.path.exists(cred_path):
+        if cred_path and os.path.exists(cred_path):
             try:
                 cred = credentials.Certificate(cred_path)
                 firebase_admin.initialize_app(cred)

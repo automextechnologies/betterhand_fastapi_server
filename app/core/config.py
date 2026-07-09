@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     USE_REDIS: bool = Field(default=False)
     
     FIREBASE_CREDENTIALS_PATH: str = Field(default="firebase-credentials.json")
+    FIREBASE_CREDENTIALS_JSON: str | None = Field(default=None)
     ORS_API_KEY: str = Field(default="your-ors-api-key-here")
     
     EMAIL_HOST_USER: str = Field(default="your-email@gmail.com")
