@@ -29,7 +29,25 @@ async def init_indexes():
     """Create indexes (unique and 2dsphere) on startup."""
     try:
         # Users
-        await db.db.users.create_index("email", unique=True)
+        try:
+            await db.db.users.drop_index("email_1")
+        except Exception:
+            pass
+        try:
+            await db.db.users.drop_index("phone_1")
+        except Exception:
+            pass
+            
+        await db.db.users.create_index(
+            "email",
+            unique=True,
+            partialFilterExpression={"email": {"$type": "string"}}
+        )
+        await db.db.users.create_index(
+            "phone",
+            unique=True,
+            partialFilterExpression={"phone": {"$type": "string"}}
+        )
         
         # Hospital Profiles
         await db.db.hospital_profiles.create_index("user_id", unique=True)
@@ -61,10 +79,6 @@ async def init_indexes():
         
         # Donation Records
         await db.db.donation_records.create_index("donor_id")
-        
-        # Chat Messages
-        await db.db.chat_messages.create_index("response_id")
-        await db.db.chat_messages.create_index("created_at")
         
         # Donor Ratings
         await db.db.donor_ratings.create_index("record_id", unique=True)

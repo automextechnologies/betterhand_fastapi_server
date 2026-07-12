@@ -4,7 +4,7 @@ from bson import ObjectId
 from app.core.config import settings
 from app.domain.entities.donation import (
     BloodRequest, DonationResponse, DonationRecord,
-    ChatMessage, DonorRating, DonorBadge, BloodCamp,
+    DonorRating, DonorBadge, BloodCamp,
     CampRegistration, Notification
 )
 from app.domain.entities.ward import WardBloodAlert
@@ -13,12 +13,12 @@ from app.domain.repositories.user_repo import UserRepository, HospitalProfileRep
 from app.domain.repositories.ward_repo import WardRepository, WardMemberRepository, WardBloodAlertRepository, WardDonorNotificationRepository
 from app.domain.repositories.donation_repo import (
     BloodRequestRepository, DonationResponseRepository, DonationRecordRepository,
-    ChatMessageRepository, DonorRatingRepository, DonorBadgeRepository,
+    DonorRatingRepository, DonorBadgeRepository,
     BloodCampRepository, CampRegistrationRepository, NotificationRepository
 )
 from app.application.dto.donation_dto import (
     BloodRequestCreateDTO, DonationResponseCreateDTO,
-    DonationRecordCreateDTO, ChatMessageCreateDTO, DonorRatingCreateDTO,
+    DonationRecordCreateDTO, DonorRatingCreateDTO,
     BloodCampCreateDTO
 )
 
@@ -39,7 +39,6 @@ class DonationUseCases:
         request_repo: BloodRequestRepository,
         response_repo: DonationResponseRepository,
         record_repo: DonationRecordRepository,
-        chat_repo: ChatMessageRepository,
         rating_repo: DonorRatingRepository,
         badge_repo: DonorBadgeRepository,
         camp_repo: BloodCampRepository,
@@ -57,7 +56,6 @@ class DonationUseCases:
         self.request_repo = request_repo
         self.response_repo = response_repo
         self.record_repo = record_repo
-        self.chat_repo = chat_repo
         self.rating_repo = rating_repo
         self.badge_repo = badge_repo
         self.camp_repo = camp_repo
@@ -705,76 +703,6 @@ class DonationUseCases:
         
         return eta_minutes or 0
 
-    async def update_donor_live_location(self, response_id: str, donor_id: str, latitude: float, longitude: float) -> float:
-        resp = await self.response_repo.get_by_id(response_id)
-        if not resp or resp.donor_id != donor_id or resp.status != "confirmed":
-            raise ValueError("Confirmed donor response not found.")
-            
-        resp.donor_latitude = latitude
-        resp.donor_longitude = longitude
-        await self.response_repo.update(resp)
-        
-        br = await self.request_repo.get_by_id(resp.request_id)
-        dist = 0.0
-        if br.hospital_latitude is not None and br.hospital_longitude is not None:
-            try:
-                dist = round(haversine_distance(
-                    latitude, longitude,
-                    br.hospital_latitude, br.hospital_longitude
-                ), 2)
-            except Exception:
-                pass
-                
-        dp = await self.donor_repo.get_by_user_id(donor_id)
-        donor_name = dp.full_name if dp else "Donor"
-        
-        payload = {
-            "response_id": resp.id,
-            "donor_name": donor_name,
-            "donor_latitude": str(latitude),
-            "donor_longitude": str(longitude),
-            "distance_remaining_km": str(dist),
-            "eta_minutes": resp.eta_minutes
-        }
-        
-        self.ws_broadcast(f"tv_{br.hospital_id}", "donor_location_update", payload)
-        self.ws_broadcast(f"hospital_{br.hospital_id}", "donor_location_update", payload)
-        
-        return dist
-
-    async def calculate_live_eta_background(self, response_id: str):
-        """Asynchronous call to ORS to calculate exact driving duration & route."""
-        resp = await self.response_repo.get_by_id(response_id)
-        if not resp or not resp.donor_latitude or not resp.donor_longitude:
-            return
-            
-        br = await self.request_repo.get_by_id(resp.request_id)
-        if not br or not br.hospital_latitude or not br.hospital_longitude:
-            return
-            
-        route_data = await calculate_driving_distance_and_eta(
-            resp.donor_latitude, resp.donor_longitude,
-            br.hospital_latitude, br.hospital_longitude
-        )
-        if route_data:
-            seconds = route_data["duration_seconds"]
-            resp.eta_minutes = max(1, int(seconds / 60))
-            resp.distance_km = round(route_data["distance_meters"] / 1000, 2)
-            await self.response_repo.update(resp)
-            
-            # Send location update websocket to update UI
-            dp = await self.donor_repo.get_by_user_id(resp.donor_id)
-            donor_name = dp.full_name if dp else "Donor"
-            payload = {
-                "response_id": resp.id,
-                "donor_name": donor_name,
-                "donor_latitude": str(resp.donor_latitude),
-                "donor_longitude": str(resp.donor_longitude),
-                "distance_remaining_km": str(resp.distance_km),
-                "eta_minutes": resp.eta_minutes
-            }
-            self.ws_broadcast(f"tv_{br.hospital_id}", "donor_location_update", payload)
-            self.ws_broadcast(f"hospital_{br.hospital_id}", "donor_location_update", payload)
 
     async def get_hospital_dashboard(self, hospital_id: str) -> dict:
         requests = await self.request_repo.list_by_hospital(hospital_id)
@@ -871,90 +799,13 @@ class DonationUseCases:
         stats["donations_this_month"] = await self.record_repo.count_by_hospital(hospital_id, since=month_ago)
         
         # Calculate monthly counts for the past 90 days
-        ninety_days_ago = datetime.utcnow() - timedelta(days=90)
-        pipeline = [
-            {"$match": {
-                "donated_at": {"$gte": ninety_days_ago}
-            }},
-            {"$group": {
-                "_id": {
-                    "year": {"$year": "$donated_at"},
-                    "month": {"$month": "$donated_at"}
-                },
-                "count": {"$sum": 1}
-            }},
-            {"$sort": {"_id.year": 1, "_id.month": 1}}
-        ]
-        cursor = db.db.donation_records.aggregate(pipeline)
-        monthly_raw = await cursor.to_list(length=10)
-        monthly_data = []
-        for m in monthly_raw:
-            y = m["_id"]["year"]
-            mo = m["_id"]["month"]
-            monthly_data.append({
-                "month": f"{y}-{mo:02d}",
-                "count": m["count"]
-            })
-            
-        stats["monthly_donations"] = monthly_data
+        stats["monthly_donations"] = await self.record_repo.get_monthly_counts_past_90_days()
         
         avg_rating = await self.rating_repo.get_avg_rating_given_by_hospital(hospital_id)
         stats["avg_donor_rating"] = round(avg_rating or 0.0, 2)
         
         return stats
 
-    # ─── Chat Message Actions ───
-    async def get_chat_history(self, response_id: str, user_id: str) -> Tuple[DonationResponse, List[ChatMessage]]:
-        resp = await self.response_repo.get_by_id(response_id)
-        if not resp:
-            raise ValueError("Response not found.")
-            
-        br = await self.request_repo.get_by_id(resp.request_id)
-        if resp.donor_id != user_id and br.hospital_id != user_id:
-            raise ValueError("Not authorized to view this chat.")
-            
-        # Mark messages as read
-        await self.chat_repo.mark_incoming_as_read(response_id, user_id)
-        
-        messages = await self.chat_repo.list_by_response(response_id)
-        return resp, messages
-
-    async def create_chat_message(self, response_id: str, sender_id: str, role: str, message_text: str) -> ChatMessage:
-        resp = await self.response_repo.get_by_id(response_id)
-        if not resp:
-            raise ValueError("Response not found.")
-            
-        br = await self.request_repo.get_by_id(resp.request_id)
-        if resp.donor_id != sender_id and br.hospital_id != sender_id:
-            raise ValueError("Not authorized to post in this chat.")
-            
-        msg = ChatMessage(
-            response_id=response_id,
-            sender_id=sender_id,
-            message=message_text,
-            is_read=False
-        )
-        
-        created_msg = await self.chat_repo.create(msg)
-        
-        sender_name = "User"
-        if role == "donor":
-            dp = await self.donor_repo.get_by_user_id(sender_id)
-            sender_name = dp.full_name if dp else "Donor"
-        elif role == "hospital":
-            hp = await self.hospital_repo.get_by_user_id(sender_id)
-            sender_name = hp.name if hp else "Hospital"
-            
-        self.ws_broadcast(f"chat_{response_id}", "chat.message", {
-            "message_id": created_msg.id,
-            "sender_id": sender_id,
-            "sender_role": role,
-            "sender_name": sender_name,
-            "message": created_msg.message,
-            "created_at": created_msg.created_at.isoformat()
-        })
-        
-        return created_msg
 
     # ─── Rating & Badges ───
     async def rate_donor(self, record_id: str, hospital_id: str, dto: DonorRatingCreateDTO) -> DonorRating:
@@ -1081,3 +932,314 @@ class DonationUseCases:
 
     async def clear_hospital_data(self, hospital_id: str) -> int:
         return await self.request_repo.clear_hospital_data(hospital_id)
+
+    async def get_request_detail_with_counts(self, request_id: str, hospital_id: str) -> dict:
+        br = await self.get_request_detail(request_id, hospital_id)
+        responses = await self.response_repo.list_by_request(request_id)
+        accepted_cnt = len([x for x in responses if x.status in ("accepted", "confirmed")])
+        rejected_cnt = len([x for x in responses if x.status == "rejected"])
+        pending_cnt = len([x for x in responses if x.status == "pending"])
+        return {
+            "request": br,
+            "total_notified": len(responses),
+            "accepted_count": accepted_cnt,
+            "rejected_count": rejected_cnt,
+            "pending_count": pending_cnt
+        }
+
+    async def get_request_top3_details(self, request_id: str, hospital_id: str) -> dict:
+        top_3 = await self.get_top_3_donors(request_id, hospital_id)
+        
+        responses = await self.response_repo.list_by_request(request_id)
+        total_accepted = len([x for x in responses if x.status in ("accepted", "confirmed")])
+        pending_count = len([x for x in responses if x.status == "pending"])
+        rejected_count = len([x for x in responses if x.status == "rejected"])
+        
+        top_3_data = []
+        for r in top_3:
+            dp = await self.donor_repo.get_by_user_id(r.donor_id)
+            top_3_data.append({
+                "id": r.id,
+                "donor_id": r.donor_id,
+                "donor_name": dp.full_name if dp else "Donor",
+                "donor_phone": dp.phone if dp else "",
+                "status": r.status,
+                "distance_km": r.distance_km,
+                "eta_minutes": r.eta_minutes
+            })
+            
+        return {
+            "request_id": request_id,
+            "top_3": top_3_data,
+            "total_accepted": total_accepted,
+            "pending_count": pending_count,
+            "rejected_count": rejected_count
+        }
+
+    async def confirm_top3_and_get_details(self, request_id: str, hospital_id: str, response_ids: List[str]) -> List[dict]:
+        confirmed = await self.confirm_all_top_3(request_id, hospital_id, response_ids)
+        confirmed_data = []
+        for r in confirmed:
+            dp = await self.donor_repo.get_by_user_id(r.donor_id)
+            confirmed_data.append({
+                "id": r.id,
+                "donor_id": r.donor_id,
+                "donor_name": dp.full_name if dp else "Donor",
+                "donor_phone": dp.phone if dp else "",
+                "status": r.status,
+                "distance_km": r.distance_km,
+                "eta_minutes": r.eta_minutes
+            })
+        return confirmed_data
+
+    async def no_donation_arrived_with_details(self, response_id: str, hospital_id: str) -> dict:
+        promoted = await self.no_donation_arrived(response_id, hospital_id)
+        promoted_name = None
+        if promoted:
+            dp = await self.donor_repo.get_by_user_id(promoted.donor_id)
+            promoted_name = dp.full_name if dp else "Next donor"
+        return {
+            "promoted": bool(promoted),
+            "promoted_name": promoted_name
+        }
+
+    async def cancel_donor_assignment_with_details(self, response_id: str, hospital_id: str) -> dict:
+        promoted = await self.cancel_donor_assignment(response_id, hospital_id)
+        promoted_name = None
+        if promoted:
+            dp = await self.donor_repo.get_by_user_id(promoted.donor_id)
+            promoted_name = dp.full_name if dp else "Next donor"
+        return {
+            "promoted": bool(promoted),
+            "promoted_name": promoted_name
+        }
+
+    async def map_response_to_donor_view(self, r: DonationResponse) -> dict:
+        br = await self.request_repo.get_by_id(r.request_id)
+        hp = await self.hospital_repo.get_by_user_id(br.hospital_id) if br else None
+        
+        via_ward = False
+        ward_member_name = None
+        ward_member_phone = None
+        
+        if br and br.notify_ward_members:
+            via_ward = True
+            target_ward_id = br.target_ward_id
+            if target_ward_id:
+                wms = await self.ward_member_repo.get_verified_members_by_ward(target_ward_id)
+                if wms:
+                    ward_member_name = wms[0].full_name
+                    ward_member_phone = wms[0].phone
+            else:
+                alert = await self.ward_alert_repo.get_by_blood_request_id(br.id)
+                if alert:
+                    wm = await self.ward_member_repo.get_by_id(alert.ward_member_id)
+                    if wm:
+                        ward_member_name = wm.full_name
+                        ward_member_phone = wm.phone
+                        
+        return {
+            "id": r.id,
+            "request_id": r.request_id,
+            "donor_id": r.donor_id,
+            "status": r.status,
+            "eta_minutes": r.eta_minutes,
+            "distance_km": r.distance_km,
+            "blood_group": br.blood_group if br else "",
+            "units_needed": br.units_needed if br else 1,
+            "urgency": br.urgency if br else "normal",
+            "hospital_name": hp.name if hp else "Hospital",
+            "hospital_phone": hp.phone if hp else "",
+            "hospital_whatsapp": hp.whatsapp_number if hp else "",
+            "hospital_latitude": hp.latitude if hp else None,
+            "hospital_longitude": hp.longitude if hp else None,
+            "patient_name": br.patient_name if br else "",
+            "patient_condition": br.patient_condition if br else "",
+            "bystander_name": br.bystander_name if br else "",
+            "bystander_phone": br.bystander_phone if br else "",
+            "via_ward": via_ward,
+            "ward_member_name": ward_member_name,
+            "ward_member_phone": ward_member_phone,
+            "responded_at": r.responded_at,
+            "created_at": r.created_at
+        }
+
+    async def get_donor_pending_requests_view(self, donor_id: str) -> List[dict]:
+        pending = await self.get_donor_pending_requests(donor_id)
+        results = []
+        for r in pending:
+            mapped = await self.map_response_to_donor_view(r)
+            results.append(mapped)
+        return results
+
+    async def list_donor_responses_view(self, donor_id: str) -> List[dict]:
+        resps = await self.response_repo.list_history_for_donor(donor_id)
+        results = []
+        for r in resps:
+            mapped = await self.map_response_to_donor_view(r)
+            results.append(mapped)
+        return results
+
+    async def get_donor_history(self, donor_id: str) -> List[dict]:
+        records = await self.record_repo.list_by_donor(donor_id)
+        results = []
+        for r in records:
+            results.append({
+                "id": r.id,
+                "blood_group": r.blood_group,
+                "units_donated": r.units_donated,
+                "hospital_name": r.hospital_name,
+                "hospital_city": r.hospital_city,
+                "donated_at": r.donated_at,
+                "notes": r.notes
+            })
+        return results
+
+    async def get_donor_cooldown_status(self, donor_id: str) -> dict:
+        last = await self.record_repo.get_last_for_donor(donor_id)
+        if not last:
+            return {
+                "is_on_cooldown": False,
+                "last_donation": None,
+                "cooldown_until": None,
+                "days_remaining": 0
+            }
+            
+        now = datetime.utcnow()
+        cd_until = last.cooldown_until
+        on_cd = now < cd_until if cd_until else False
+        days = max(0, (cd_until - now).days) if on_cd else 0
+        
+        return {
+            "is_on_cooldown": on_cd,
+            "last_donation": last.donated_at,
+            "cooldown_until": cd_until,
+            "days_remaining": days
+        }
+
+    async def get_hospital_dashboard_formatted(self, hospital_id: str) -> dict:
+        data = await self.get_hospital_dashboard(hospital_id)
+        
+        formatted_active = []
+        for item in data["active_requests"]:
+            br = item["request"]
+            top_3 = item["top_3"]
+            confirmed_donors = item["confirmed_donors"]
+            
+            top_3_list = []
+            for r in top_3:
+                dp = await self.donor_repo.get_by_user_id(r.donor_id)
+                top_3_list.append({
+                    "id": r.id,
+                    "donor_id": r.donor_id,
+                    "donor_name": dp.full_name if dp else "Donor",
+                    "donor_phone": dp.phone if dp else "",
+                    "status": r.status,
+                    "distance_km": r.distance_km,
+                    "eta_minutes": r.eta_minutes
+                })
+                
+            confirmed_list = []
+            for r in confirmed_donors:
+                dp = await self.donor_repo.get_by_user_id(r.donor_id)
+                confirmed_list.append({
+                    "id": r.id,
+                    "donor_id": r.donor_id,
+                    "donor_name": dp.full_name if dp else "Donor",
+                    "donor_phone": dp.phone if dp else "",
+                    "status": r.status,
+                    "distance_km": r.distance_km,
+                    "eta_minutes": r.eta_minutes
+                })
+                
+            formatted_active.append({
+                "request": {
+                    "id": br.id,
+                    "blood_group": br.blood_group,
+                    "units_needed": br.units_needed,
+                    "urgency": br.urgency,
+                    "status": br.status,
+                    "patient_name": br.patient_name,
+                    "patient_condition": br.patient_condition,
+                    "bystander_name": br.bystander_name,
+                    "bystander_phone": br.bystander_phone,
+                    "created_at": br.created_at
+                },
+                "top_3": top_3_list,
+                "total_notified": item["total_notified"],
+                "accepted_count": item["accepted_count"],
+                "rejected_count": item["rejected_count"],
+                "pending_count": item["pending_count"],
+                "confirmed_donors": confirmed_list
+            })
+            
+        return {
+            "stats": data["stats"],
+            "active_requests": formatted_active
+        }
+
+    async def list_active_camps_formatted(self, city: Optional[str] = None, blood_group: Optional[str] = None) -> List[dict]:
+        camps = await self.list_active_camps(city, blood_group)
+        results = []
+        for c in camps:
+            count = await self.camp_reg_repo.count_active_by_camp(c.id)
+            hp = await self.hospital_repo.get_by_user_id(c.hospital_id)
+            hospital_name = hp.name if hp else "Hospital"
+            results.append({
+                "id": c.id,
+                "title": c.title,
+                "description": c.description,
+                "location": c.location,
+                "city": c.city,
+                "state": c.state,
+                "latitude": c.latitude,
+                "longitude": c.longitude,
+                "scheduled_date": c.scheduled_date.isoformat() if isinstance(c.scheduled_date, (datetime, date)) else str(c.scheduled_date),
+                "start_time": c.start_time,
+                "end_time": c.end_time,
+                "capacity": c.capacity,
+                "target_blood_groups": c.target_blood_groups,
+                "registered_count": count,
+                "is_full": count >= c.capacity,
+                "hospital_name": hospital_name
+            })
+        return results
+
+    async def get_donor_camp_registrations_formatted(self, donor_id: str) -> List[dict]:
+        regs = await self.get_donor_camp_registrations(donor_id)
+        results = []
+        for r in regs:
+            c = await self.camp_repo.get_by_id(r.camp_id)
+            if c:
+                hp = await self.hospital_repo.get_by_user_id(c.hospital_id)
+                hospital_name = hp.name if hp else "Hospital"
+                results.append({
+                    "id": r.id,
+                    "camp": {
+                        "id": c.id,
+                        "title": c.title,
+                        "location": c.location,
+                        "scheduled_date": c.scheduled_date.isoformat() if isinstance(c.scheduled_date, (datetime, date)) else str(c.scheduled_date),
+                        "hospital_name": hospital_name
+                    },
+                    "status": r.status,
+                    "registered_at": r.registered_at
+                })
+        return results
+
+    async def get_hospital_camps_formatted(self, hospital_id: str) -> List[dict]:
+        camps = await self.get_hospital_camps(hospital_id)
+        results = []
+        for c in camps:
+            count = await self.camp_reg_repo.count_active_by_camp(c.id)
+            results.append({
+                "id": c.id,
+                "title": c.title,
+                "location": c.location,
+                "scheduled_date": c.scheduled_date.isoformat() if isinstance(c.scheduled_date, (datetime, date)) else str(c.scheduled_date),
+                "capacity": c.capacity,
+                "registered_count": count,
+                "is_full": count >= c.capacity
+            })
+        return results
+

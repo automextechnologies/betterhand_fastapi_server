@@ -10,7 +10,7 @@ from app.infrastructure.repositories.mongo_ward_repo import (
 )
 from app.infrastructure.repositories.mongo_donation_repo import (
     MongoBloodRequestRepository, MongoDonationResponseRepository, MongoDonationRecordRepository,
-    MongoChatMessageRepository, MongoDonorRatingRepository, MongoDonorBadgeRepository,
+    MongoDonorRatingRepository, MongoDonorBadgeRepository,
     MongoBloodCampRepository, MongoCampRegistrationRepository, MongoNotificationRepository
 )
 
@@ -18,6 +18,7 @@ from app.infrastructure.repositories.mongo_donation_repo import (
 from app.application.use_cases.auth_use_cases import AuthUseCases
 from app.application.use_cases.donation_use_cases import DonationUseCases
 from app.application.use_cases.ward_use_cases import WardUseCases
+from app.application.use_cases.admin_use_cases import AdminUseCases
 
 # Repository Dependencies
 def get_user_repository() -> MongoUserRepository:
@@ -50,8 +51,6 @@ def get_response_repository() -> MongoDonationResponseRepository:
 def get_record_repository() -> MongoDonationRecordRepository:
     return MongoDonationRecordRepository()
 
-def get_chat_repository() -> MongoChatMessageRepository:
-    return MongoChatMessageRepository()
 
 def get_rating_repository() -> MongoDonorRatingRepository:
     return MongoDonorRatingRepository()
@@ -88,7 +87,6 @@ def get_donation_use_cases(
     request_repo: MongoBloodRequestRepository = Depends(get_request_repository),
     response_repo: MongoDonationResponseRepository = Depends(get_response_repository),
     record_repo: MongoDonationRecordRepository = Depends(get_record_repository),
-    chat_repo: MongoChatMessageRepository = Depends(get_chat_repository),
     rating_repo: MongoDonorRatingRepository = Depends(get_rating_repository),
     badge_repo: MongoDonorBadgeRepository = Depends(get_badge_repository),
     camp_repo: MongoBloodCampRepository = Depends(get_camp_repository),
@@ -106,7 +104,6 @@ def get_donation_use_cases(
         request_repo=request_repo,
         response_repo=response_repo,
         record_repo=record_repo,
-        chat_repo=chat_repo,
         rating_repo=rating_repo,
         badge_repo=badge_repo,
         camp_repo=camp_repo,
@@ -141,4 +138,19 @@ def get_ward_use_cases(
         rating_repo=rating_repo,
         badge_repo=badge_repo,
         ws_broadcast_func=ws_broadcast
+    )
+
+def get_admin_use_cases(
+    user_repo: MongoUserRepository = Depends(get_user_repository),
+    hospital_repo: MongoHospitalProfileRepository = Depends(get_hospital_repository),
+    donor_repo: MongoDonorProfileRepository = Depends(get_donor_repository),
+    ward_member_repo: MongoWardMemberRepository = Depends(get_ward_member_repository),
+    ward_repo: MongoWardRepository = Depends(get_ward_repository)
+) -> AdminUseCases:
+    return AdminUseCases(
+        user_repo=user_repo,
+        hospital_repo=hospital_repo,
+        donor_repo=donor_repo,
+        ward_member_repo=ward_member_repo,
+        ward_repo=ward_repo
     )

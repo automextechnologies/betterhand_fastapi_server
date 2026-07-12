@@ -210,6 +210,10 @@ class MongoWardRepository(WardRepository):
         docs = await db.db.wards.find(query).to_list(length=200)
         return [map_ward_to_entity(doc) for doc in docs]
 
+    async def list_all(self) -> List[Ward]:
+        docs = await db.db.wards.find({}).to_list(length=10000)
+        return [map_ward_to_entity(doc) for doc in docs]
+
 
 class MongoWardMemberRepository(WardMemberRepository):
     async def get_by_id(self, member_id: str) -> Optional[WardMember]:
@@ -254,6 +258,17 @@ class MongoWardMemberRepository(WardMemberRepository):
                 query[k] = v
         docs = await db.db.ward_members.find(query).limit(limit).to_list(length=limit)
         return [map_ward_member_to_entity(doc) for doc in docs]
+
+    async def list_all(self) -> List[WardMember]:
+        docs = await db.db.ward_members.find({}).to_list(length=10000)
+        return [map_ward_member_to_entity(doc) for doc in docs]
+
+    async def get_members_by_ward(self, ward_id: str) -> List[WardMember]:
+        try:
+            docs = await db.db.ward_members.find({"ward_id": ObjectId(ward_id)}).to_list(length=100)
+            return [map_ward_member_to_entity(doc) for doc in docs]
+        except Exception:
+            return []
 
 
 class MongoWardBloodAlertRepository(WardBloodAlertRepository):
@@ -316,6 +331,13 @@ class MongoWardBloodAlertRepository(WardBloodAlertRepository):
             query["status"] = status
         docs = await db.db.ward_blood_alerts.find(query).sort("created_at", -1).to_list(length=500)
         return [map_alert_to_entity(doc) for doc in docs]
+
+    async def get_by_blood_request_id(self, request_id: str) -> Optional[WardBloodAlert]:
+        try:
+            doc = await db.db.ward_blood_alerts.find_one({"blood_request_id": ObjectId(request_id)})
+            return map_alert_to_entity(doc) if doc else None
+        except Exception:
+            return None
 
 
 class MongoWardDonorNotificationRepository(WardDonorNotificationRepository):

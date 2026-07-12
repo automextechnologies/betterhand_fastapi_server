@@ -11,7 +11,9 @@ class ConnectionManager:
         self.active_connections: Dict[str, Set[WebSocket]] = {}
 
     async def connect(self, websocket: WebSocket, room: str):
-        await websocket.accept()
+        from starlette.websockets import WebSocketState
+        if websocket.client_state == WebSocketState.CONNECTING:
+            await websocket.accept()
         if room not in self.active_connections:
             self.active_connections[room] = set()
         self.active_connections[room].add(websocket)

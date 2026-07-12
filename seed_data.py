@@ -104,16 +104,15 @@ async def seed():
         logger.info(f"Hospital {hospital_email} already exists.")
 
     # 3. Seed Donor
-    donor_email = "donor_a@gmail.com"
-    existing_donor = await db.db.users.find_one({"email": donor_email})
+    donor_phone = "+919988776655"
+    existing_donor = await db.db.users.find_one({"phone": donor_phone})
     if not existing_donor:
         logger.info("Registering test donor...")
         d_dto = DonorRegisterDTO(
-            email=donor_email,
             password="donorpassword123",
             full_name="Donor A (Near)",
             blood_group="O+",
-            phone="+919988776655",
+            phone=donor_phone,
             age=25,
             gender="M",
             address="Sub-street Kochi",
@@ -129,20 +128,19 @@ async def seed():
             whatsapp_number="+919988776655"
         )
         await auth_use_cases.register_donor(d_dto)
-        logger.info(f"Registered donor user: {donor_email} with password: donorpassword123")
+        logger.info(f"Registered donor user with phone: {donor_phone} with password: donorpassword123")
     else:
-        logger.info(f"Donor {donor_email} already exists.")
+        logger.info(f"Donor with phone {donor_phone} already exists.")
 
     # 4. Seed Ward Member
-    ward_email = "ward_member@gmail.com"
-    existing_ward_user = await db.db.users.find_one({"email": ward_email})
+    ward_phone = "+919998887776"
+    existing_ward_user = await db.db.users.find_one({"phone": ward_phone})
     if not existing_ward_user:
         logger.info("Registering test ward member...")
         w_dto = WardMemberRegisterDTO(
-            email=ward_email,
             password="wardpassword123",
             full_name="Ward Member A",
-            phone="+919998887776",
+            phone=ward_phone,
             designation="Councillor",
             ward_id=ward_id,
             state="Kerala",
@@ -152,9 +150,9 @@ async def seed():
             ward_number="12"
         )
         await ward_use_cases.register_ward_member(w_dto)
-        logger.info(f"Registered ward member: {ward_email} with password: wardpassword123")
+        logger.info(f"Registered ward member with phone: {ward_phone} with password: wardpassword123")
     else:
-        logger.info(f"Ward member {ward_email} already exists.")
+        logger.info(f"Ward member with phone {ward_phone} already exists.")
 
     await close_mongo_connection()
     logger.info("Database seeding complete!")

@@ -149,18 +149,6 @@ class DonationRecordCreateDTO(BaseModel):
 class CompleteWithoutDonationDTO(BaseModel):
     reason: str = "Blood no longer needed"
 
-# ─── ChatMessage DTOs ───
-class ChatMessageDTO(BaseModel):
-    id: str
-    sender_id: str
-    sender_name: str
-    sender_role: str
-    message: str
-    is_read: bool
-    created_at: datetime
-
-class ChatMessageCreateDTO(BaseModel):
-    message: str
 
 # ─── Rating and Badges DTOs ───
 class DonorRatingCreateDTO(BaseModel):

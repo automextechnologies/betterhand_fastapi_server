@@ -8,7 +8,8 @@ from app.domain.repositories.user_repo import UserRepository, HospitalProfileRep
 def map_user_to_entity(doc: dict) -> User:
     return User(
         id=str(doc["_id"]),
-        email=doc.get("email", ""),
+        email=doc.get("email"),
+        phone=doc.get("phone"),
         hashed_password=doc.get("hashed_password", ""),
         role=doc.get("role", ""),
         is_active=doc.get("is_active", True),
@@ -20,6 +21,7 @@ def map_user_to_entity(doc: dict) -> User:
 def map_user_to_db(entity: User) -> dict:
     data = {
         "email": entity.email,
+        "phone": entity.phone,
         "hashed_password": entity.hashed_password,
         "role": entity.role,
         "is_active": entity.is_active,
@@ -235,15 +237,25 @@ class MongoUserRepository(UserRepository):
         doc = await db.db.users.find_one({"email": email.strip().lower()})
         return map_user_to_entity(doc) if doc else None
 
+    async def get_by_phone(self, phone: str) -> Optional[User]:
+        doc = await db.db.users.find_one({"phone": phone.strip()})
+        return map_user_to_entity(doc) if doc else None
+
     async def create(self, user: User) -> User:
-        user.email = user.email.strip().lower()
+        if user.email:
+            user.email = user.email.strip().lower()
+        if user.phone:
+            user.phone = user.phone.strip()
         doc = map_user_to_db(user)
         result = await db.db.users.insert_one(doc)
         user.id = str(result.inserted_id)
         return user
 
     async def update(self, user: User) -> User:
-        user.email = user.email.strip().lower()
+        if user.email:
+            user.email = user.email.strip().lower()
+        if user.phone:
+            user.phone = user.phone.strip()
         doc = map_user_to_db(user)
         await db.db.users.replace_one({"_id": ObjectId(user.id)}, doc)
         return user
@@ -255,6 +267,14 @@ class MongoUserRepository(UserRepository):
     async def get_by_role(self, role: str) -> List[User]:
         cursor = db.db.users.find({"role": role})
         docs = await cursor.to_list(length=1000)
+        return [map_user_to_entity(doc) for doc in docs]
+
+    async def list_all(self) -> List[User]:
+        docs = await db.db.users.find({}).to_list(length=10000)
+        return [map_user_to_entity(doc) for doc in docs]
+
+    async def get_users_with_fcm_token(self) -> List[User]:
+        docs = await db.db.users.find({"fcm_token": {"$exists": True, "$ne": ""}}).to_list(length=10000)
         return [map_user_to_entity(doc) for doc in docs]
 
 
@@ -284,6 +304,10 @@ class MongoHospitalProfileRepository(HospitalProfileRepository):
         doc = map_hospital_to_db(profile)
         await db.db.hospital_profiles.replace_one({"_id": ObjectId(profile.id)}, doc)
         return profile
+
+    async def list_all(self) -> List[HospitalProfile]:
+        docs = await db.db.hospital_profiles.find({}).to_list(length=10000)
+        return [map_hospital_to_entity(doc) for doc in docs]
 
 
 class MongoDonorProfileRepository(DonorProfileRepository):
@@ -336,10 +360,13 @@ class MongoDonorProfileRepository(DonorProfileRepository):
             ).to_list(length=1000)
             excluded_donor_ids = [ObjectId(r["donor_id"]) for r in records if "donor_id" in r]
             
+        import re
+        normalized_bg = blood_group.strip().upper().replace(" ", "+")
+        
         # MongoDB 2d Sphere Geospatial Query
         # 1 radian ~ 6378.1 km, so distance in radians is radius_km / 6378.1
         query = {
-            "blood_group": blood_group,
+            "blood_group": {"$regex": f"^{re.escape(normalized_bg)}$", "$options": "i"},
             "is_available": True,
         }
         
@@ -383,3 +410,50 @@ class MongoDonorProfileRepository(DonorProfileRepository):
         
         cursor = db.db.donor_profiles.aggregate(pipeline)
         return await cursor.to_list(length=1000)
+
+    async def list_all(self) -> List[DonorProfile]:
+        docs = await db.db.donor_profiles.find({}).to_list(length=10000)
+        return [map_donor_to_entity(doc) for doc in docs]
+
+    async def list_by_ward(
+        self,
+        state: str,
+        local_body_name: str,
+        ward_number: str,
+        is_available: Optional[bool] = None,
+        user_ids: Optional[List[str]] = None,
+        blood_group: Optional[str] = None
+    ) -> List[DonorProfile]:
+        import re
+        query = {
+            "state": {"$regex": f"^{re.escape(state)}$", "$options": "i"},
+            "local_body_name": {"$regex": f"^{re.escape(local_body_name)}$", "$options": "i"},
+            "ward_number": str(ward_number)
+        }
+        if is_available is not None:
+            query["is_available"] = is_available
+        if user_ids is not None:
+            query["user_id"] = {"$in": [ObjectId(uid) for uid in user_ids]}
+        if blood_group is not None:
+            normalized_bg = blood_group.strip().upper().replace(" ", "+")
+            query["blood_group"] = {"$regex": f"^{re.escape(normalized_bg)}$", "$options": "i"}
+            
+        docs = await db.db.donor_profiles.find(query).to_list(length=1000)
+        return [map_donor_to_entity(doc) for doc in docs]
+
+    async def count_by_ward(
+        self,
+        state: str,
+        local_body_name: str,
+        ward_number: str,
+        is_available: Optional[bool] = None
+    ) -> int:
+        import re
+        query = {
+            "state": {"$regex": f"^{re.escape(state)}$", "$options": "i"},
+            "local_body_name": {"$regex": f"^{re.escape(local_body_name)}$", "$options": "i"},
+            "ward_number": str(ward_number)
+        }
+        if is_available is not None:
+            query["is_available"] = is_available
+        return await db.db.donor_profiles.count_documents(query)

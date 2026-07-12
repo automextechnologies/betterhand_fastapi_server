@@ -21,7 +21,6 @@ class WardResponse(BaseModel):
     members: List[WardMemberBasicResponse] = []
 
 class WardMemberRegisterDTO(BaseModel):
-    email: EmailStr
     password: str = Field(..., min_length=8)
     full_name: str
     phone: str
@@ -32,10 +31,10 @@ class WardMemberRegisterDTO(BaseModel):
     local_body_type: Optional[str] = ""
     local_body_name: Optional[str] = ""
     ward_number: Optional[str] = ""
+    fcm_token: Optional[str] = ""
 
 class WardMemberProfileResponse(BaseModel):
     id: str
-    email: str
     full_name: str
     phone: str
     designation: str
@@ -89,3 +88,7 @@ class WardDonorNotificationResponse(BaseModel):
     notes: str
     contacted_at: Optional[datetime] = None
     created_at: datetime
+
+class BroadcastAlertDTO(BaseModel):
+    donor_ids: Optional[List[str]] = None
+

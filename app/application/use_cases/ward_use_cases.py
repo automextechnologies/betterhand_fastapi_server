@@ -3,7 +3,6 @@ from typing import Optional, List, Dict, Tuple, Any
 from bson import ObjectId
 from app.core.config import settings
 from app.core.security import hash_password
-from app.infrastructure.database.mongodb import db
 from app.domain.entities.user import User
 from app.domain.entities.ward import Ward, WardMember, WardBloodAlert, WardDonorNotification
 from app.domain.entities.donation import DonationResponse
@@ -47,10 +46,10 @@ class WardUseCases:
         self.ws_broadcast = ws_broadcast_func or (lambda g, ev, p: None)
 
     async def register_ward_member(self, dto: WardMemberRegisterDTO) -> User:
-        # Check if email is already taken
-        existing_user = await self.user_repo.get_by_email(dto.email)
+        # Check if phone is already taken
+        existing_user = await self.user_repo.get_by_phone(dto.phone)
         if existing_user:
-            raise ValueError("Email already registered.")
+            raise ValueError("Phone number already registered.")
             
         # Resolve ward
         if dto.ward_id:
@@ -73,10 +72,11 @@ class WardUseCases:
             
         # Create User entity
         user = User(
-            email=dto.email,
+            phone=dto.phone,
             hashed_password=hash_password(dto.password),
             role="ward_member",
-            is_active=True
+            is_active=True,
+            fcm_token=dto.fcm_token
         )
         created_user = await self.user_repo.create(user)
         
@@ -117,20 +117,18 @@ class WardUseCases:
         # Find all donor profiles matching these fields
         # Note: we match case insensitively where possible or directly in MongoDB
         # Let's write an aggregation query or query donor profiles
-        query = {
-            "state": {"$regex": f"^{ward.state}$", "$options": "i"},
-            "local_body_name": {"$regex": f"^{ward.local_body_name}$", "$options": "i"},
-            "ward_number": str(ward.ward_number)
-        }
-        
-        docs = await db.db.donor_profiles.find(query).to_list(length=1000)
+        donors = await self.donor_repo.list_by_ward(
+            state=ward.state,
+            local_body_name=ward.local_body_name,
+            ward_number=ward.ward_number
+        )
         
         top_donors = []
         cooldown_cutoff = datetime.utcnow() - timedelta(days=settings.DONOR_COOLDOWN_DAYS)
         
-        for d in docs:
-            donor_id = str(d["_id"])
-            user_id_str = str(d["user_id"])
+        for d in donors:
+            donor_id = d.id
+            user_id_str = d.user_id
             
             # check last donation and cooldown
             last_record = await self.record_repo.get_last_for_donor(user_id_str)
@@ -148,26 +146,25 @@ class WardUseCases:
             badges = [b.badge for b in badges_list]
             
             dist = 0.0
-            if ward.latitude and ward.longitude and d.get("location"):
-                coords = d["location"]["coordinates"]
-                dist = haversine_distance(ward.latitude, ward.longitude, coords[1], coords[0])
+            if ward.latitude and ward.longitude and d.latitude and d.longitude:
+                dist = haversine_distance(ward.latitude, ward.longitude, d.latitude, d.longitude)
                 
             whatsapp_link = None
-            if d.get("whatsapp_number"):
-                whatsapp_link = f"https://wa.me/{d['whatsapp_number']}"
-            elif d.get("phone"):
-                whatsapp_link = f"https://wa.me/{d['phone']}"
+            if d.whatsapp_number:
+                whatsapp_link = f"https://wa.me/{d.whatsapp_number}"
+            elif d.phone:
+                whatsapp_link = f"https://wa.me/{d.phone}"
                 
             top_donors.append({
                 "donor_id": user_id_str,
-                "full_name": d.get("full_name", ""),
-                "phone": d.get("phone", ""),
-                "blood_group": d.get("blood_group", ""),
-                "district": d.get("district", ""),
-                "local_body_name": d.get("local_body_name", ""),
-                "ward_number": d.get("ward_number", ""),
+                "full_name": d.full_name or "",
+                "phone": d.phone or "",
+                "blood_group": d.blood_group or "",
+                "district": d.district or "",
+                "local_body_name": d.local_body_name or "",
+                "ward_number": d.ward_number or "",
                 "distance_km": round(dist, 2),
-                "is_available": d.get("is_available", True),
+                "is_available": d.is_available,
                 "last_donated": last_donated,
                 "on_cooldown": on_cooldown,
                 "avg_rating": round(avg_rating, 2) if avg_rating else None,
@@ -185,7 +182,7 @@ class WardUseCases:
         
         return top_donors
 
-    async def broadcast_ward_alert(self, alert_id: str) -> int:
+    async def broadcast_ward_alert(self, alert_id: str, donor_ids: Optional[List[str]] = None) -> int:
         alert = await self.ward_alert_repo.get_by_id(alert_id)
         if not alert:
             return 0
@@ -208,19 +205,18 @@ class WardUseCases:
         cooldown_cutoff = datetime.utcnow() - timedelta(days=settings.DONOR_COOLDOWN_DAYS)
         
         # STRICT WARD MATCH — same ward only, matching blood group
-        query = {
-            "blood_group": alert.blood_group,
-            "is_available": True,
-            "ward_number": str(ward.ward_number),
-            "local_body_name": {"$regex": f"^{ward.local_body_name}$", "$options": "i"},
-            "state": {"$regex": f"^{ward.state}$", "$options": "i"}
-        }
-        
-        docs = await db.db.donor_profiles.find(query).to_list(length=1000)
+        donors = await self.donor_repo.list_by_ward(
+            state=ward.state,
+            local_body_name=ward.local_body_name,
+            ward_number=ward.ward_number,
+            is_available=True,
+            user_ids=donor_ids,
+            blood_group=alert.blood_group
+        )
         
         n = 0
-        for d in docs:
-            donor_user_id = str(d["user_id"])
+        for d in donors:
+            donor_user_id = d.user_id
             
             # Check cooldown
             last_record = await self.record_repo.get_last_for_donor(donor_user_id)
@@ -267,4 +263,267 @@ class WardUseCases:
         alert.status = "notified"
         await self.ward_alert_repo.update(alert)
         return n
+
+    async def get_ward_members(self, ward_id: str) -> List[WardMember]:
+        return await self.ward_member_repo.get_members_by_ward(ward_id)
+
+    async def get_ward_dashboard_stats(self, ward_member_id: str) -> dict:
+        profile = await self.ward_member_repo.get_by_id(ward_member_id)
+        if not profile:
+            raise ValueError("Ward member profile not found.")
+            
+        ward = await self.ward_repo.get_by_id(profile.ward_id)
+        if not ward:
+            raise ValueError("Ward not associated.")
+            
+        alerts = await self.ward_alert_repo.list_by_member(profile.id)
+        
+        total_donors = await self.donor_repo.count_by_ward(
+            state=ward.state,
+            local_body_name=ward.local_body_name,
+            ward_number=ward.ward_number
+        )
+        avail_donors = await self.donor_repo.count_by_ward(
+            state=ward.state,
+            local_body_name=ward.local_body_name,
+            ward_number=ward.ward_number,
+            is_available=True
+        )
+        
+        recent_alerts_data = []
+        for a in alerts[:5]:
+            recent_alerts_data.append({
+                "id": a.id,
+                "blood_group": a.blood_group,
+                "urgency": a.urgency,
+                "patient_name": a.patient_name,
+                "patient_condition": a.patient_condition,
+                "hospital_name": a.hospital_name,
+                "hospital_phone": a.hospital_phone,
+                "hospital_whatsapp": a.hospital_whatsapp,
+                "bystander_phone": a.bystander_phone,
+                "hospital_latitude": a.hospital_latitude,
+                "hospital_longitude": a.hospital_longitude,
+                "hospital_message": a.hospital_message,
+                "status": a.status,
+                "ward_name": ward.local_body_name,
+                "ward_number": ward.ward_number,
+                "member_name": profile.full_name,
+                "member_phone": profile.phone,
+                "blood_request_id": a.blood_request_id,
+                "resolved_at": a.resolved_at.isoformat() if a.resolved_at else None,
+                "created_at": a.created_at.isoformat()
+            })
+            
+        ward_data = ward.__dict__.copy()
+        ward_data["id"] = ward.id
+        ward_data = {k: v for k, v in ward_data.items() if not k.startswith("_")}
+        
+        return {
+            "ward": ward_data,
+            "member_name": profile.full_name,
+            "is_verified": profile.is_verified,
+            "alerts": {
+                "total": len(alerts),
+                "pending": len([x for x in alerts if x.status == "pending"]),
+                "notified": len([x for x in alerts if x.status == "notified"]),
+                "resolved": len([x for x in alerts if x.status == "resolved"])
+            },
+            "ward_donors": {
+                "total": total_donors,
+                "available": avail_donors
+            },
+            "recent_alerts": recent_alerts_data
+        }
+
+    async def login_ward_member(self, phone: str, password: str, fcm_token: Optional[str] = None) -> dict:
+        user = await self.user_repo.get_by_phone(phone)
+        if not user:
+            raise ValueError("Invalid credentials.")
+            
+        from app.core.security import verify_password, create_access_token, create_refresh_token
+        if not verify_password(password, user.hashed_password):
+            raise ValueError("Invalid credentials.")
+            
+        if user.role != "ward_member":
+            raise ValueError("Not a ward member account.")
+            
+        if fcm_token:
+            user.fcm_token = fcm_token
+            await self.user_repo.update(user)
+            
+        access = create_access_token(user.id)
+        refresh = create_refresh_token(user.id)
+        
+        profile = await self.ward_member_repo.get_by_user_id(user.id)
+        ward = await self.ward_repo.get_by_id(profile.ward_id) if profile else None
+        
+        ward_data = None
+        if ward:
+            ward_data = {
+                "id": ward.id,
+                "ward_number": ward.ward_number,
+                "local_body_name": ward.local_body_name,
+                "district": ward.district,
+                "state": ward.state
+            }
+            
+        return {
+            "access": access,
+            "refresh": refresh,
+            "role": user.role,
+            "user": {
+                "id": user.id,
+                "email": user.email,
+                "phone": user.phone,
+                "role": user.role,
+                "profile": {
+                    "id": profile.id if profile else None,
+                    "full_name": profile.full_name if profile else None,
+                    "phone": profile.phone if profile else None,
+                    "designation": profile.designation if profile else None,
+                    "is_verified": profile.is_verified if profile else False,
+                    "ward": ward_data
+                }
+            }
+        }
+
+    async def get_ward_member_profile_response(self, user_id: str) -> dict:
+        profile = await self.ward_member_repo.get_by_user_id(user_id)
+        if not profile:
+            raise ValueError("Ward member profile not found.")
+            
+        ward = await self.ward_repo.get_by_id(profile.ward_id) if profile.ward_id else None
+        
+        members_data = []
+        if ward:
+            members = await self.ward_member_repo.get_members_by_ward(ward.id)
+            for m in members:
+                members_data.append({
+                    "id": m.id,
+                    "full_name": m.full_name,
+                    "phone": m.phone,
+                    "designation": m.designation,
+                    "is_verified": m.is_verified
+                })
+                
+        ward_resp = None
+        if ward:
+            ward_resp = {
+                "id": ward.id,
+                "ward_number": ward.ward_number,
+                "local_body_name": ward.local_body_name,
+                "local_body_type": ward.local_body_type,
+                "district": ward.district,
+                "state": ward.state,
+                "latitude": ward.latitude,
+                "longitude": ward.longitude,
+                "members": members_data
+            }
+            
+        return {
+            "id": profile.id,
+            "full_name": profile.full_name,
+            "phone": profile.phone,
+            "designation": profile.designation,
+            "is_verified": profile.is_verified,
+            "ward": ward_resp
+        }
+
+    async def list_wards_formatted(self, filters: dict, has_member: bool = False) -> List[dict]:
+        wards = await self.ward_repo.search_wards(filters, has_member=has_member)
+        results = []
+        for w in wards:
+            members = await self.ward_member_repo.get_members_by_ward(w.id)
+            members_data = []
+            for m in members:
+                members_data.append({
+                    "id": m.id,
+                    "full_name": m.full_name,
+                    "phone": m.phone,
+                    "designation": m.designation,
+                    "is_verified": m.is_verified
+                })
+            results.append({
+                "id": w.id,
+                "ward_number": w.ward_number,
+                "local_body_name": w.local_body_name,
+                "local_body_type": w.local_body_type,
+                "district": w.district,
+                "state": w.state,
+                "latitude": w.latitude,
+                "longitude": w.longitude,
+                "members": members_data
+            })
+        return results
+
+    async def get_alert_details_formatted(self, alert_id: str, ward_member_id: str) -> dict:
+        a = await self.ward_alert_repo.get_by_id(alert_id)
+        if not a or a.ward_member_id != ward_member_id:
+            raise ValueError("Alert not found.")
+            
+        donors = await self.get_top_donors_in_ward(ward_member_id)
+        matching = [d for d in donors if d["blood_group"].lower().strip() == a.blood_group.lower().strip()]
+        
+        for d in matching:
+            if d["last_donated"]:
+                d["last_donated"] = d["last_donated"].isoformat()
+                
+        bystander = ""
+        if a.blood_request_id:
+            br = await self.request_repo.get_by_id(a.blood_request_id)
+            if br:
+                bystander = br.bystander_phone or ""
+                
+        return {
+            "blood_group": a.blood_group,
+            "urgency": a.urgency,
+            "hospital_name": a.hospital_name,
+            "hospital_phone": a.hospital_phone,
+            "hospital_whatsapp": a.hospital_whatsapp,
+            "patient_name": a.patient_name,
+            "hospital_message": a.hospital_message,
+            "bystander_phone": bystander,
+            "top_donors": matching
+        }
+
+    async def resolve_alert(self, alert_id: str, ward_member_id: str) -> None:
+        a = await self.ward_alert_repo.get_by_id(alert_id)
+        if not a or a.ward_member_id != ward_member_id:
+            raise ValueError("Alert not found.")
+            
+        a.status = "resolved"
+        a.resolved_at = datetime.utcnow()
+        await self.ward_alert_repo.update(a)
+
+    async def get_alert_notifications_formatted(self, alert_id: str, ward_member_id: str) -> List[dict]:
+        a = await self.ward_alert_repo.get_by_id(alert_id)
+        if not a or a.ward_member_id != ward_member_id:
+            raise ValueError("Alert not found.")
+            
+        notifs = await self.ward_notif_repo.list_by_alert(alert_id)
+        
+        results = []
+        for n in notifs:
+            donor_profile = await self.donor_repo.get_by_user_id(n.donor_id)
+            donor_name = donor_profile.full_name if donor_profile else "Donor"
+            donor_phone = donor_profile.phone if donor_profile else ""
+            
+            status_val = n.status
+            if a.blood_request_id:
+                resp = await self.response_repo.get_by_request_and_donor(a.blood_request_id, n.donor_id)
+                if resp:
+                    status_val = resp.status
+                    
+            results.append({
+                "id": n.id,
+                "donor_name": donor_name,
+                "donor_phone": donor_phone,
+                "status": status_val,
+                "notes": n.notes,
+                "contacted_at": n.contacted_at,
+                "created_at": n.created_at
+            })
+        return results
+
 

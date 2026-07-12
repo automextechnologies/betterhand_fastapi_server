@@ -17,9 +17,9 @@ class HospitalRegisterDTO(BaseModel):
     ward_number: Optional[str] = ""
     pincode: Optional[str] = ""
     whatsapp_number: Optional[str] = ""
+    fcm_token: Optional[str] = ""
 
 class DonorRegisterDTO(BaseModel):
-    email: EmailStr
     password: str = Field(..., min_length=8)
     full_name: str
     blood_group: str
@@ -36,9 +36,11 @@ class DonorRegisterDTO(BaseModel):
     is_student: Optional[bool] = False
     college_name: Optional[str] = ""
     college_district: Optional[str] = ""
+    fcm_token: Optional[str] = ""
 
 class LoginDTO(BaseModel):
-    email: EmailStr
+    email: Optional[str] = None
+    phone: Optional[str] = None
     password: str
     fcm_token: Optional[str] = ""
 
@@ -119,7 +121,8 @@ class DonorProfileResponse(BaseModel):
 
 class UserMeResponse(BaseModel):
     id: str
-    email: str
+    email: Optional[str] = None
+    phone: Optional[str] = None
     role: str
     date_joined: datetime
     profile: Optional[Any] = None

@@ -5,7 +5,8 @@ from typing import Optional, List, Dict, Any
 @dataclass
 class User:
     id: Optional[str] = None
-    email: str = ""
+    email: Optional[str] = None
+    phone: Optional[str] = None
     hashed_password: str = ""
     role: str = "" # "hospital", "donor", "ward_member"
     is_active: bool = True

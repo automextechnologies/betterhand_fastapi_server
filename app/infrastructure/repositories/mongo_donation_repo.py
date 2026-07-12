@@ -4,12 +4,12 @@ from bson import ObjectId
 from app.infrastructure.database.mongodb import db
 from app.domain.entities.donation import (
     BloodRequest, DonationResponse, DonationRecord,
-    ChatMessage, DonorRating, DonorBadge, BloodCamp,
+    DonorRating, DonorBadge, BloodCamp,
     CampRegistration, Notification
 )
 from app.domain.repositories.donation_repo import (
     BloodRequestRepository, DonationResponseRepository, DonationRecordRepository,
-    ChatMessageRepository, DonorRatingRepository, DonorBadgeRepository,
+    DonorRatingRepository, DonorBadgeRepository,
     BloodCampRepository, CampRegistrationRepository, NotificationRepository
 )
 
@@ -169,28 +169,6 @@ def map_record_to_db(entity: DonationRecord) -> dict:
     return data
 
 
-# ─── ChatMessage Mappers ───
-def map_chat_to_entity(doc: dict) -> ChatMessage:
-    return ChatMessage(
-        id=str(doc["_id"]),
-        response_id=str(doc.get("response_id", "")),
-        sender_id=str(doc.get("sender_id", "")),
-        message=doc.get("message", ""),
-        is_read=doc.get("is_read", False),
-        created_at=doc.get("created_at", datetime.utcnow())
-    )
-
-def map_chat_to_db(entity: ChatMessage) -> dict:
-    data = {
-        "response_id": ObjectId(entity.response_id) if entity.response_id else "",
-        "sender_id": ObjectId(entity.sender_id) if entity.sender_id else "",
-        "message": entity.message,
-        "is_read": entity.is_read,
-        "created_at": entity.created_at
-    }
-    if entity.id:
-        data["_id"] = ObjectId(entity.id)
-    return data
 
 
 # ─── DonorRating Mappers ───
@@ -419,9 +397,7 @@ class MongoBloodRequestRepository(BloodRequestRepository):
         responses = await db.db.donation_responses.find({"request_id": {"$in": request_ids}}).to_list(length=5000)
         response_ids = [ObjectId(res["_id"]) for res in responses]
         
-        # Delete chats
-        if response_ids:
-            await db.db.chat_messages.delete_many({"response_id": {"$in": response_ids}})
+
             
         # Delete ward alerts/notifications linked to these requests
         await db.db.ward_donor_notifications.delete_many({"alert_id": {"$in": request_ids}})
@@ -484,15 +460,15 @@ class MongoDonationResponseRepository(DonationResponseRepository):
         return response
 
     async def list_pending_for_donor(self, donor_id: str) -> List[DonationResponse]:
-        # Pending responses for active requests
+        # Pending/Active/Confirmed responses for active/confirmed requests
         active_requests = await db.db.blood_requests.find({
-            "status": {"$in": ["pending", "active"]}
+            "status": {"$in": ["pending", "active", "confirmed"]}
         }).to_list(length=1000)
         request_ids = [ObjectId(r["_id"]) for r in active_requests]
         
         query = {
             "donor_id": ObjectId(donor_id),
-            "status": "pending",
+            "status": {"$in": ["pending", "accepted", "confirmed"]},
             "request_id": {"$in": request_ids}
         }
         docs = await db.db.donation_responses.find(query).sort("created_at", -1).to_list(length=100)
@@ -510,6 +486,16 @@ class MongoDonationResponseRepository(DonationResponseRepository):
             "donor_id": ObjectId(donor_id)
         }).sort("created_at", -1).to_list(length=500)
         return [map_response_to_entity(doc) for doc in docs]
+
+    async def get_by_request_and_donor(self, request_id: str, donor_id: str) -> Optional[DonationResponse]:
+        try:
+            doc = await db.db.donation_responses.find_one({
+                "request_id": ObjectId(request_id),
+                "donor_id": ObjectId(donor_id)
+            })
+            return map_response_to_entity(doc) if doc else None
+        except Exception:
+            return None
 
     async def update_status_by_query(self, query: dict, new_status: str) -> int:
         mongo_query = {}
@@ -625,51 +611,33 @@ class MongoDonationRecordRepository(DonationRecordRepository):
             "by_status": stat_breakdown
         }
 
-
-class MongoChatMessageRepository(ChatMessageRepository):
-    async def create(self, msg: ChatMessage) -> ChatMessage:
-        doc = map_chat_to_db(msg)
-        result = await db.db.chat_messages.insert_one(doc)
-        msg.id = str(result.inserted_id)
-        return msg
-
-    async def list_by_response(self, response_id: str) -> List[ChatMessage]:
-        docs = await db.db.chat_messages.find({
-            "response_id": ObjectId(response_id)
-        }).sort("created_at", 1).to_list(length=1000)
-        return [map_chat_to_entity(doc) for doc in docs]
-
-    async def mark_incoming_as_read(self, response_id: str, reader_id: str) -> int:
-        result = await db.db.chat_messages.update_many(
-            {
-                "response_id": ObjectId(response_id),
-                "sender_id": {"$ne": ObjectId(reader_id)},
-                "is_read": False
-            },
-            {"$set": {"is_read": True}}
-        )
-        return result.modified_count
-
-    async def get_unread_counts(self, response_ids: List[str], reader_id: str) -> Dict[str, int]:
-        obj_ids = [ObjectId(rid) for rid in response_ids]
+    async def get_monthly_counts_past_90_days(self) -> List[dict]:
+        from datetime import timedelta
+        ninety_days_ago = datetime.utcnow() - timedelta(days=90)
         pipeline = [
-            {
-                "$match": {
-                    "response_id": {"$in": obj_ids},
-                    "sender_id": {"$ne": ObjectId(reader_id)},
-                    "is_read": False
-                }
-            },
-            {"$group": {"_id": "$response_id", "unread": {"$sum": 1}}}
+            {"$match": {
+                "donated_at": {"$gte": ninety_days_ago}
+            }},
+            {"$group": {
+                "_id": {
+                    "year": {"$year": "$donated_at"},
+                    "month": {"$month": "$donated_at"}
+                },
+                "count": {"$sum": 1}
+            }},
+            {"$sort": {"_id.year": 1, "_id.month": 1}}
         ]
-        cursor = db.db.chat_messages.aggregate(pipeline)
-        res_list = await cursor.to_list(length=len(response_ids) + 10)
-        return {str(x["_id"]): x["unread"] for x in res_list}
-
-    async def delete_by_responses(self, response_ids: List[str]) -> int:
-        obj_ids = [ObjectId(rid) for rid in response_ids]
-        result = await db.db.chat_messages.delete_many({"response_id": {"$in": obj_ids}})
-        return result.deleted_count
+        cursor = db.db.donation_records.aggregate(pipeline)
+        monthly_raw = await cursor.to_list(length=10)
+        monthly_data = []
+        for m in monthly_raw:
+            y = m["_id"]["year"]
+            mo = m["_id"]["month"]
+            monthly_data.append({
+                "month": f"{y}-{mo:02d}",
+                "count": m["count"]
+            })
+        return monthly_data
 
 
 class MongoDonorRatingRepository(DonorRatingRepository):

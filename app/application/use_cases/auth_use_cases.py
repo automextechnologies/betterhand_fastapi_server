@@ -30,7 +30,8 @@ class AuthUseCases:
             email=dto.email,
             hashed_password=hash_password(dto.password),
             role="hospital",
-            is_active=True
+            is_active=True,
+            fcm_token=dto.fcm_token
         )
         created_user = await self.user_repo.create(user)
         
@@ -54,17 +55,18 @@ class AuthUseCases:
         return created_user
 
     async def register_donor(self, dto: DonorRegisterDTO) -> User:
-        # Check if email is already taken
-        existing_user = await self.user_repo.get_by_email(dto.email)
+        # Check if phone is already taken
+        existing_user = await self.user_repo.get_by_phone(dto.phone)
         if existing_user:
-            raise ValueError("Email already registered.")
+            raise ValueError("Phone number already registered.")
             
         # Create User entity
         user = User(
-            email=dto.email,
+            phone=dto.phone,
             hashed_password=hash_password(dto.password),
             role="donor",
-            is_active=True
+            is_active=True,
+            fcm_token=dto.fcm_token
         )
         created_user = await self.user_repo.create(user)
         
@@ -92,12 +94,22 @@ class AuthUseCases:
         return created_user
 
     async def login_user(self, dto: LoginDTO) -> Tuple[User, TokenResponse]:
-        user = await self.user_repo.get_by_email(dto.email)
-        if not user:
-            raise ValueError("Invalid email or password.")
+        if dto.email:
+            user = await self.user_repo.get_by_email(dto.email)
+            if not user or user.role != "hospital":
+                raise ValueError("Invalid email or password.")
+        elif dto.phone:
+            user = await self.user_repo.get_by_phone(dto.phone)
+            if not user or user.role not in ("donor", "ward_member"):
+                raise ValueError("Invalid phone number or password.")
+        else:
+            raise ValueError("Email or phone number required.")
             
         if not verify_password(dto.password, user.hashed_password):
-            raise ValueError("Invalid email or password.")
+            if dto.email:
+                raise ValueError("Invalid email or password.")
+            else:
+                raise ValueError("Invalid phone number or password.")
             
         if not user.is_active:
             raise ValueError("Account is disabled.")
@@ -161,3 +173,22 @@ class AuthUseCases:
             body="This is a test notification from the BetterHand Hospital command."
         )
         return {"sent": len(tokens), "message": f"Test notification broadcasted to {len(tokens)} donor(s)."}
+
+    async def refresh_tokens(self, refresh_token: str) -> TokenResponse:
+        from jose import jwt
+        from app.core.config import settings
+        try:
+            payload = jwt.decode(refresh_token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+            user_id = payload.get("sub")
+            if not user_id:
+                raise ValueError("Invalid refresh token payload.")
+                
+            user = await self.user_repo.get_by_id(user_id)
+            if not user:
+                raise ValueError("User not found.")
+                
+            access_token = create_access_token(user.id)
+            new_refresh_token = create_refresh_token(user.id)
+            return TokenResponse(access=access_token, refresh=new_refresh_token)
+        except Exception:
+            raise ValueError("Invalid or expired refresh token.")

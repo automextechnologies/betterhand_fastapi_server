@@ -29,7 +29,13 @@ async def register_hospital(
             "message": "Hospital registered successfully.",
             "access": access,
             "refresh": refresh,
-            "role": user.role
+            "role": user.role,
+            "user": {
+                "id": user.id,
+                "email": user.email,
+                "phone": user.phone,
+                "role": user.role
+            }
         }
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
@@ -49,7 +55,13 @@ async def register_donor(
             "message": "Donor registered successfully.",
             "access": access,
             "refresh": refresh,
-            "role": user.role
+            "role": user.role,
+            "user": {
+                "id": user.id,
+                "email": user.email,
+                "phone": user.phone,
+                "role": user.role
+            }
         }
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
@@ -83,6 +95,7 @@ async def login(
         user_data = {
             "id": user.id,
             "email": user.email,
+            "phone": user.phone,
             "role": user.role,
             "date_joined": user.date_joined.isoformat(),
             "profile": profile_data
@@ -101,35 +114,26 @@ async def login(
 
 @router.post("/token/refresh/")
 @router.post("/token/refresh")
-async def token_refresh(data: dict):
+async def token_refresh(
+    data: dict,
+    auth_use_cases: AuthUseCases = Depends(get_auth_use_cases)
+):
     refresh_token = data.get("refresh")
     if not refresh_token:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Refresh token required.")
         
-    from app.core.security import decode_access_token, create_access_token, create_refresh_token
-    payload = decode_access_token(refresh_token)
-    if not payload or payload.get("type") != "refresh":
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired refresh token.")
-        
-    user_id = payload.get("sub")
-    if not user_id:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token payload.")
-        
-    user_doc = await db.db.users.find_one({"_id": ObjectId(user_id)})
-    if not user_doc or not user_doc.get("is_active"):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User is inactive or not found.")
-        
-    new_access = create_access_token(user_id)
-    new_refresh = create_refresh_token(user_id)
-    
-    return {
-        "access": new_access,
-        "refresh": new_refresh,
-        "tokens": {
-            "access": new_access,
-            "refresh": new_refresh
+    try:
+        token_res = await auth_use_cases.refresh_tokens(refresh_token)
+        return {
+            "access": token_res.access,
+            "refresh": token_res.refresh,
+            "tokens": {
+                "access": token_res.access,
+                "refresh": token_res.refresh
+            }
         }
-    }
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(e))
 
 @router.post("/logout/")
 async def logout():
@@ -159,6 +163,7 @@ async def get_me(
     return {
         "id": current_user.id,
         "email": current_user.email,
+        "phone": current_user.phone,
         "role": current_user.role,
         "date_joined": current_user.date_joined,
         "profile": profile_data
@@ -293,8 +298,10 @@ async def search_donors(
     lon = hospital.longitude if has_location else 0.0
     lat = hospital.latitude if has_location else 0.0
     
+    normalized_blood_group = blood_group.strip().upper().replace(" ", "+")
+    
     donors = await donor_repo.search_donors(
-        blood_group=blood_group,
+        blood_group=normalized_blood_group,
         longitude=lon,
         latitude=lat,
         radius_km=radius_km,

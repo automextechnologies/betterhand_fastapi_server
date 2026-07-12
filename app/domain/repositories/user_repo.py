@@ -12,6 +12,10 @@ class UserRepository(ABC):
         pass
 
     @abstractmethod
+    async def get_by_phone(self, phone: str) -> Optional[User]:
+        pass
+
+    @abstractmethod
     async def create(self, user: User) -> User:
         pass
 
@@ -25,6 +29,14 @@ class UserRepository(ABC):
 
     @abstractmethod
     async def get_by_role(self, role: str) -> List[User]:
+        pass
+
+    @abstractmethod
+    async def list_all(self) -> List[User]:
+        pass
+
+    @abstractmethod
+    async def get_users_with_fcm_token(self) -> List[User]:
         pass
 
 
@@ -43,6 +55,10 @@ class HospitalProfileRepository(ABC):
 
     @abstractmethod
     async def update(self, profile: HospitalProfile) -> HospitalProfile:
+        pass
+
+    @abstractmethod
+    async def list_all(self) -> List[HospitalProfile]:
         pass
 
 
@@ -76,4 +92,30 @@ class DonorProfileRepository(ABC):
 
     @abstractmethod
     async def get_distinct_colleges(self, district: Optional[str] = None) -> List[dict]:
+        pass
+
+    @abstractmethod
+    async def list_all(self) -> List[DonorProfile]:
+        pass
+
+    @abstractmethod
+    async def list_by_ward(
+        self,
+        state: str,
+        local_body_name: str,
+        ward_number: str,
+        is_available: Optional[bool] = None,
+        user_ids: Optional[List[str]] = None,
+        blood_group: Optional[str] = None
+    ) -> List[DonorProfile]:
+        pass
+
+    @abstractmethod
+    async def count_by_ward(
+        self,
+        state: str,
+        local_body_name: str,
+        ward_number: str,
+        is_available: Optional[bool] = None
+    ) -> int:
         pass

@@ -3,7 +3,7 @@ from typing import Optional, List, Dict
 from datetime import datetime
 from app.domain.entities.donation import (
     BloodRequest, DonationResponse, DonationRecord,
-    ChatMessage, DonorRating, DonorBadge, BloodCamp,
+    DonorRating, DonorBadge, BloodCamp,
     CampRegistration, Notification
 )
 
@@ -60,8 +60,14 @@ class DonationResponseRepository(ABC):
         pass
 
     @abstractmethod
+    async def get_by_request_and_donor(self, request_id: str, donor_id: str) -> Optional[DonationResponse]:
+        pass
+
+    @abstractmethod
     async def update_status_by_query(self, query: dict, new_status: str) -> int:
         pass
+
+
 
 
 class DonationRecordRepository(ABC):
@@ -93,28 +99,9 @@ class DonationRecordRepository(ABC):
     async def get_success_rate_and_breakdowns(self, hospital_id: str) -> dict:
         pass
 
-
-class ChatMessageRepository(ABC):
     @abstractmethod
-    async def create(self, msg: ChatMessage) -> ChatMessage:
+    async def get_monthly_counts_past_90_days(self) -> List[dict]:
         pass
-
-    @abstractmethod
-    async def list_by_response(self, response_id: str) -> List[ChatMessage]:
-        pass
-
-    @abstractmethod
-    async def mark_incoming_as_read(self, response_id: str, reader_id: str) -> int:
-        pass
-
-    @abstractmethod
-    async def get_unread_counts(self, response_ids: List[str], reader_id: str) -> Dict[str, int]:
-        pass
-
-    @abstractmethod
-    async def delete_by_responses(self, response_ids: List[str]) -> int:
-        pass
-
 
 class DonorRatingRepository(ABC):
     @abstractmethod

@@ -34,7 +34,7 @@ async def run_tests():
         get_user_repository, get_hospital_repository, get_donor_repository,
         get_ward_repository, get_ward_member_repository, get_ward_alert_repository,
         get_ward_notif_repository, get_request_repository, get_response_repository,
-        get_record_repository, get_chat_repository, get_rating_repository,
+        get_record_repository, get_rating_repository,
         get_badge_repository, get_camp_repository, get_camp_reg_repository,
         get_notif_repository
     )
@@ -53,7 +53,6 @@ async def run_tests():
     request_repo = get_request_repository()
     response_repo = get_response_repository()
     record_repo = get_record_repository()
-    chat_repo = get_chat_repository()
     rating_repo = get_rating_repository()
     badge_repo = get_badge_repository()
     camp_repo = get_camp_repository()
@@ -72,7 +71,6 @@ async def run_tests():
         request_repo=request_repo,
         response_repo=response_repo,
         record_repo=record_repo,
-        chat_repo=chat_repo,
         rating_repo=rating_repo,
         badge_repo=badge_repo,
         camp_repo=camp_repo,
@@ -141,7 +139,6 @@ async def run_tests():
         # 3. Register Near Donor A (O+ blood, within 5 km)
         logger.info("Test Step 3: Registering Near Donor A...")
         d_a_dto = DonorRegisterDTO(
-            email="donor_a@gmail.com",
             password="donorpassword123",
             full_name="Donor A (Near)",
             blood_group="O+",
@@ -170,12 +167,11 @@ async def run_tests():
         donor_a = await auth_use_cases.register_donor(d_a_dto)
         assert donor_a.id is not None
         await auth_use_cases.update_location(donor_a.id, "donor", UpdateLocationDTO(latitude=9.982000, longitude=76.267400))
-        logger.info(f"Donor A registered: {donor_a.email} (ID: {donor_a.id}) and coordinates set.")
+        logger.info(f"Donor A registered: {donor_a.phone} (ID: {donor_a.id}) and coordinates set.")
         
         # 4. Register Far Donor B (O+ blood, 15 km away)
         logger.info("Test Step 4: Registering Far Donor B...")
         d_b_dto = DonorRegisterDTO(
-            email="donor_b@gmail.com",
             password="donorpassword123",
             full_name="Donor B (Far)",
             blood_group="O+",
@@ -204,7 +200,7 @@ async def run_tests():
         donor_b = await auth_use_cases.register_donor(d_b_dto)
         assert donor_b.id is not None
         await auth_use_cases.update_location(donor_b.id, "donor", UpdateLocationDTO(latitude=10.150000, longitude=76.350000))
-        logger.info(f"Donor B registered: {donor_b.email} (ID: {donor_b.id}) and coordinates set.")
+        logger.info(f"Donor B registered: {donor_b.phone} (ID: {donor_b.id}) and coordinates set.")
         
         # 4b. Test search_donors repository with radius 10 km and radius 0 (All)
         logger.info("Test Step 4b: Testing search_donors repository with radius 10 km...")
@@ -273,7 +269,6 @@ async def run_tests():
         # 6. Register Ward Member for the ward
         logger.info("Test Step 6: Registering ward member...")
         wm_dto = WardMemberRegisterDTO(
-            email="ward_member@panchayat.gov.in",
             password="wardmember123",
             full_name="John Doe",
             phone="+919876500000",
@@ -289,7 +284,7 @@ async def run_tests():
         
         # Automatically mark ward member as verified for tests
         await db.db.ward_members.update_one({"user_id": ObjectId(wm_user.id)}, {"$set": {"is_verified": True}})
-        logger.info(f"Ward Member registered and verified: {wm_user.email} (ID: {wm_user.id})")
+        logger.info(f"Ward Member registered and verified: {wm_user.phone} (ID: {wm_user.id})")
         
         # Trigger notification match again to notify the newly registered and verified ward member
         await donation_use_cases.notify_donors_and_wards_background(br.id)

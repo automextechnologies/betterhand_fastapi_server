@@ -1,14 +1,16 @@
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
+from app.application.use_cases.admin_use_cases import AdminUseCases
+from app.dependencies.db_repos import get_admin_use_cases
 
 from app.core.config import settings
 from app.infrastructure.database.mongodb import connect_to_mongo, close_mongo_connection
 from app.api.routers.auth import router as auth_router
 from app.api.routers.ward import router as ward_router
-from app.api.routers.donation import router as donation_router
+from app.api.routers.donation import router as donation_router, ws_router
 
 # Configure Logging
 logging.basicConfig(
@@ -47,6 +49,7 @@ app.include_router(auth_router, prefix="/api/accounts", tags=["Accounts"])
 app.include_router(auth_router, prefix="/api/auth", tags=["Auth"])
 app.include_router(ward_router, prefix="/api/ward", tags=["Ward"])
 app.include_router(donation_router, prefix="/api/donation", tags=["Donation"])
+app.include_router(ws_router, tags=["WebSocket"])
 
 
 @app.get("/")
@@ -58,18 +61,34 @@ async def root():
     }
 
 
+@app.post("/admin/broadcast-notification")
+async def admin_broadcast_notification(
+    data: dict = None,
+    admin_use_cases: AdminUseCases = Depends(get_admin_use_cases)
+):
+    title = "BetterHand Announcement"
+    body = "This is a broadcast notification from the administrator."
+    if data:
+        title = data.get("title", title)
+        body = data.get("body", body)
+        
+    try:
+        return await admin_use_cases.broadcast_admin_notification(title, body)
+    except Exception as e:
+        logger.error(f"Error broadcasting admin notification: {e}")
+        return {"status": "error", "message": f"Broadcast failed: {str(e)}"}
+
+
 @app.get("/admin", response_class=HTMLResponse)
 @app.get("/admi", response_class=HTMLResponse)
-async def admin_dashboard():
+async def admin_dashboard(admin_use_cases: AdminUseCases = Depends(get_admin_use_cases)):
     try:
-        from app.infrastructure.database.mongodb import db
-        
-        # Bulk query from collections to prevent N+1 queries
-        users = await db.db.users.find({}).to_list(length=10000)
-        hospitals = await db.db.hospital_profiles.find({}).to_list(length=10000)
-        donors = await db.db.donor_profiles.find({}).to_list(length=10000)
-        ward_members = await db.db.ward_members.find({}).to_list(length=10000)
-        wards = await db.db.wards.find({}).to_list(length=10000)
+        data = await admin_use_cases.get_admin_dashboard_data()
+        users = data["users"]
+        hospitals = data["hospitals"]
+        donors = data["donors"]
+        ward_members = data["ward_members"]
+        wards = data["wards"]
     except Exception as e:
         logger.error(f"Database error in admin dashboard: {e}")
         return HTMLResponse(
@@ -97,8 +116,8 @@ async def admin_dashboard():
         )
         
     # Map users and wards by string ID
-    user_map = {str(u["_id"]): u for u in users}
-    ward_map = {str(w["_id"]): w for w in wards}
+    user_map = {str(u.id): u for u in users}
+    ward_map = {str(w.id): w for w in wards}
     
     # Counters
     total_hospitals = len(hospitals)
@@ -106,26 +125,26 @@ async def admin_dashboard():
     total_ward_members = len(ward_members)
     total_users = len(users)
     
-    push_enabled_count = sum(1 for u in users if u.get("fcm_token"))
+    push_enabled_count = sum(1 for u in users if u.fcm_token)
     push_percentage = round((push_enabled_count / total_users * 100), 1) if total_users > 0 else 0.0
 
     # Build Hospital Rows
     hospital_rows = ""
     for i, h in enumerate(hospitals, 1):
-        uid = str(h.get("user_id", ""))
-        u = user_map.get(uid, {})
-        email = u.get("email", "N/A")
+        uid = str(h.user_id or "")
+        u = user_map.get(uid)
+        email = u.email if u else "N/A"
         
-        v_badge = '<span class="px-2.5 py-0.5 text-xs font-semibold rounded-full bg-blue-100 text-blue-800">Verified</span>' if h.get("is_verified") else '<span class="px-2.5 py-0.5 text-xs font-semibold rounded-full bg-amber-100 text-amber-800">Unverified</span>'
+        v_badge = '<span class="px-2.5 py-0.5 text-xs font-semibold rounded-full bg-blue-100 text-blue-800">Verified</span>' if h.is_verified else '<span class="px-2.5 py-0.5 text-xs font-semibold rounded-full bg-amber-100 text-amber-800">Unverified</span>'
         
         hospital_rows += f"""
-        <tr class="hover:bg-slate-50 transition-colors border-b border-slate-100 search-row" data-search="{h.get('name', '')} {email} {h.get('phone', '')} {h.get('district', '')}">
+        <tr class="hover:bg-slate-50 transition-colors border-b border-slate-100 search-row" data-search="{h.name or ''} {email} {h.phone or ''} {h.district or ''}">
             <td class="px-6 py-4 text-sm text-slate-500 font-medium">{i}</td>
-            <td class="px-6 py-4 text-sm font-semibold text-slate-900">{h.get('name', 'N/A')}</td>
+            <td class="px-6 py-4 text-sm font-semibold text-slate-900">{h.name or 'N/A'}</td>
             <td class="px-6 py-4 text-sm text-slate-600">{email}</td>
-            <td class="px-6 py-4 text-sm text-slate-600">{h.get('phone', 'N/A')}</td>
-            <td class="px-6 py-4 text-sm text-slate-600">{h.get('registration_number', 'N/A')}</td>
-            <td class="px-6 py-4 text-sm text-slate-600">{h.get('city', 'N/A')}, {h.get('district', 'N/A')}</td>
+            <td class="px-6 py-4 text-sm text-slate-600">{h.phone or 'N/A'}</td>
+            <td class="px-6 py-4 text-sm text-slate-600">{h.registration_number or 'N/A'}</td>
+            <td class="px-6 py-4 text-sm text-slate-600">{h.city or 'N/A'}, {h.district or 'N/A'}</td>
             <td class="px-6 py-4 text-sm">{v_badge}</td>
         </tr>
         """
@@ -133,21 +152,21 @@ async def admin_dashboard():
     # Build Donor Rows
     donor_rows = ""
     for i, d in enumerate(donors, 1):
-        uid = str(d.get("user_id", ""))
-        u = user_map.get(uid, {})
-        email = u.get("email", "N/A")
-        fcm = u.get("fcm_token")
+        uid = str(d.user_id or "")
+        u = user_map.get(uid)
+        email = u.email if u else "N/A"
+        fcm = u.fcm_token if u else None
         
         push_badge = '<span class="px-2.5 py-0.5 text-xs font-semibold rounded-full bg-emerald-100 text-emerald-800">Enabled</span>' if fcm else '<span class="px-2.5 py-0.5 text-xs font-semibold rounded-full bg-slate-100 text-slate-500">Disabled</span>'
         
         donor_rows += f"""
-        <tr class="hover:bg-slate-50 transition-colors border-b border-slate-100 search-row" data-search="{d.get('full_name', '')} {email} {d.get('blood_group', '')} {d.get('district', '')}">
+        <tr class="hover:bg-slate-50 transition-colors border-b border-slate-100 search-row" data-search="{d.full_name or ''} {email} {d.blood_group or ''} {d.district or ''}">
             <td class="px-6 py-4 text-sm text-slate-500 font-medium">{i}</td>
-            <td class="px-6 py-4 text-sm font-semibold text-slate-900">{d.get('full_name', 'N/A')}</td>
-            <td class="px-6 py-4 text-sm text-rose-600 font-bold text-center">{d.get('blood_group', 'N/A')}</td>
-            <td class="px-6 py-4 text-sm text-slate-600 text-center">{d.get('age', 'N/A')} ({d.get('gender', 'N/A')})</td>
-            <td class="px-6 py-4 text-sm text-slate-600">{d.get('phone', 'N/A')}</td>
-            <td class="px-6 py-4 text-sm text-slate-600">{d.get('district', 'N/A')}, {d.get('local_body_name', 'N/A')}</td>
+            <td class="px-6 py-4 text-sm font-semibold text-slate-900">{d.full_name or 'N/A'}</td>
+            <td class="px-6 py-4 text-sm text-rose-600 font-bold text-center">{d.blood_group or 'N/A'}</td>
+            <td class="px-6 py-4 text-sm text-slate-600 text-center">{d.age or 'N/A'} ({d.gender or 'N/A'})</td>
+            <td class="px-6 py-4 text-sm text-slate-600">{d.phone or 'N/A'}</td>
+            <td class="px-6 py-4 text-sm text-slate-600">{d.district or 'N/A'}, {d.local_body_name or 'N/A'}</td>
             <td class="px-6 py-4 text-sm text-center">{push_badge}</td>
         </tr>
         """
@@ -155,24 +174,24 @@ async def admin_dashboard():
     # Build Ward Member Rows
     ward_member_rows = ""
     for i, wm in enumerate(ward_members, 1):
-        uid = str(wm.get("user_id", ""))
-        u = user_map.get(uid, {})
-        email = u.get("email", "N/A")
-        fcm = u.get("fcm_token")
-        wid = str(wm.get("ward_id", ""))
-        w_info = ward_map.get(wid, {})
-        ward_display = f"Ward {w_info.get('ward_number', 'N/A')} ({w_info.get('local_body_name', 'N/A')})" if w_info else "N/A"
+        uid = str(wm.user_id or "")
+        u = user_map.get(uid)
+        email = u.email if u else "N/A"
+        fcm = u.fcm_token if u else None
+        wid = str(wm.ward_id or "")
+        w_info = ward_map.get(wid)
+        ward_display = f"Ward {w_info.ward_number or 'N/A'} ({w_info.local_body_name or 'N/A'})" if w_info else "N/A"
         
-        v_badge = '<span class="px-2.5 py-0.5 text-xs font-semibold rounded-full bg-blue-100 text-blue-800">Verified</span>' if wm.get("is_verified") else '<span class="px-2.5 py-0.5 text-xs font-semibold rounded-full bg-amber-100 text-amber-800">Unverified</span>'
+        v_badge = '<span class="px-2.5 py-0.5 text-xs font-semibold rounded-full bg-blue-100 text-blue-800">Verified</span>' if wm.is_verified else '<span class="px-2.5 py-0.5 text-xs font-semibold rounded-full bg-amber-100 text-amber-800">Unverified</span>'
         push_badge = '<span class="px-2.5 py-0.5 text-xs font-semibold rounded-full bg-emerald-100 text-emerald-800">Enabled</span>' if fcm else '<span class="px-2.5 py-0.5 text-xs font-semibold rounded-full bg-slate-100 text-slate-500">Disabled</span>'
         
         ward_member_rows += f"""
-        <tr class="hover:bg-slate-50 transition-colors border-b border-slate-100 search-row" data-search="{wm.get('full_name', '')} {email} {wm.get('phone', '')} {ward_display}">
+        <tr class="hover:bg-slate-50 transition-colors border-b border-slate-100 search-row" data-search="{wm.full_name or ''} {email} {wm.phone or ''} {ward_display}">
             <td class="px-6 py-4 text-sm text-slate-500 font-medium">{i}</td>
-            <td class="px-6 py-4 text-sm font-semibold text-slate-900">{wm.get('full_name', 'N/A')}</td>
+            <td class="px-6 py-4 text-sm font-semibold text-slate-900">{wm.full_name or 'N/A'}</td>
             <td class="px-6 py-4 text-sm text-slate-600">{email}</td>
-            <td class="px-6 py-4 text-sm text-slate-600">{wm.get('phone', 'N/A')}</td>
-            <td class="px-6 py-4 text-sm text-slate-600">{wm.get('designation', 'N/A')}</td>
+            <td class="px-6 py-4 text-sm text-slate-600">{wm.phone or 'N/A'}</td>
+            <td class="px-6 py-4 text-sm text-slate-600">{wm.designation or 'N/A'}</td>
             <td class="px-6 py-4 text-sm text-slate-600">{ward_display}</td>
             <td class="px-6 py-4 text-sm">{v_badge}</td>
             <td class="px-6 py-4 text-sm text-center">{push_badge}</td>
@@ -277,6 +296,33 @@ async def admin_dashboard():
                     </div>
                     <h3 class="text-3xl font-bold text-slate-900">{push_enabled_count} <span class="text-lg font-medium text-slate-400">/ {total_users}</span></h3>
                     <p class="text-xs text-emerald-600 font-semibold mt-2">{push_percentage}% opt-in rate</p>
+                </div>
+            </div>
+
+            <!-- System Broadcast Center -->
+            <div class="bg-white rounded-xl shadow-sm border border-slate-200/80 p-6 mb-8 hover:shadow-md transition-shadow">
+                <h3 class="text-lg font-bold text-slate-900 mb-2 flex items-center gap-2">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-5 h-5 text-rose-500">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M19.114 5.636a9 9 0 010 12.728M16.463 8.288a5.25 5.25 0 010 7.424M6.75 8.25l4.72-4.72a.75.75 0 011.28.53v15.88a.75.75 0 01-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.01 9.01 0 012.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75z" />
+                    </svg>
+                    FCM Push Notification Broadcast Center
+                </h3>
+                <p class="text-slate-500 text-sm mb-4">Send a global push notification announcement to all active registered devices (donors, hospitals, and ward members).</p>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-xs font-semibold uppercase text-slate-500 mb-1">Notification Title</label>
+                        <input type="text" id="broadcastTitle" placeholder="e.g., BetterHand Urgent Alert" value="BetterHand Announcement" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500 transition-colors">
+                    </div>
+                    <div>
+                        <label class="block text-xs font-semibold uppercase text-slate-500 mb-1">Notification Body Message</label>
+                        <input type="text" id="broadcastBody" placeholder="e.g., Blood drive campaign starting tomorrow..." value="This is a broadcast notification from the administrator." class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500 transition-colors">
+                    </div>
+                </div>
+                <div class="mt-4 flex items-center justify-between">
+                    <div id="broadcastStatus" class="text-xs font-semibold text-slate-500"></div>
+                    <button onclick="sendBroadcast()" id="broadcastBtn" class="px-5 py-2.5 bg-rose-600 hover:bg-rose-700 active:bg-rose-800 text-white text-sm font-semibold rounded-lg shadow-sm hover:shadow transition-all flex items-center gap-2">
+                        <span>Send Broadcast to All ({push_enabled_count} Devices)</span>
+                    </button>
                 </div>
             </div>
 
@@ -419,6 +465,51 @@ async def admin_dashboard():
                         row.classList.add('hidden');
                     }}
                 }});
+            }}
+
+            async function sendBroadcast() {{
+                const title = document.getElementById('broadcastTitle').value.trim();
+                const body = document.getElementById('broadcastBody').value.trim();
+                const btn = document.getElementById('broadcastBtn');
+                const statusDiv = document.getElementById('broadcastStatus');
+                
+                if (!title || !body) {{
+                    alert('Please fill in both title and body fields.');
+                    return;
+                }}
+                
+                btn.disabled = true;
+                btn.classList.add('opacity-50', 'cursor-not-allowed');
+                statusDiv.className = 'text-xs font-semibold text-slate-500';
+                statusDiv.innerText = 'Sending broadcast...';
+                
+                try {{
+                    const response = await fetch('/admin/broadcast-notification', {{
+                        method: 'POST',
+                        headers: {{
+                            'Content-Type': 'application/json'
+                        }},
+                        body: JSON.stringify({{ title, body }})
+                    }});
+                    const result = await response.json();
+                    
+                    if (result.status === 'success') {{
+                        statusDiv.className = 'text-xs font-semibold text-emerald-600';
+                        statusDiv.innerText = result.message;
+                        alert('Broadcast Success: ' + result.message);
+                    }} else {{
+                        statusDiv.className = 'text-xs font-semibold text-rose-600';
+                        statusDiv.innerText = result.message;
+                        alert('Broadcast Failed: ' + result.message);
+                    }}
+                }} catch (error) {{
+                    statusDiv.className = 'text-xs font-semibold text-rose-600';
+                    statusDiv.innerText = 'Network error sending broadcast.';
+                    alert('Error: Failed to communicate with the server.');
+                }} finally {{
+                    btn.disabled = false;
+                    btn.classList.remove('opacity-50', 'cursor-not-allowed');
+                }}
             }}
         </script>
     </body>

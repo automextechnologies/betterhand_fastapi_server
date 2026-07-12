@@ -3,17 +3,16 @@ from typing import Optional, List
 from datetime import datetime, timedelta
 from bson import ObjectId
 from app.core.config import settings
-from app.infrastructure.database.mongodb import db
 from app.domain.entities.user import User
 from app.domain.entities.donation import (
-    BloodRequest, DonationResponse, DonationRecord, ChatMessage,
+    BloodRequest, DonationResponse, DonationRecord,
     DonorRating, DonorBadge, BloodCamp, CampRegistration, Notification
 )
 from app.application.dto.donation_dto import (
     BloodRequestCreateDTO, DonationResponseCreateDTO,
-    DonationRecordCreateDTO, ChatMessageCreateDTO, DonorRatingCreateDTO,
+    DonationRecordCreateDTO, DonorRatingCreateDTO,
     BloodCampCreateDTO, BloodCampResponse, CampRegistrationResponse,
-    TVScreenDataResponse, NotificationResponseDTO
+    TVScreenDataResponse, NotificationResponseDTO, DonationResponseDonorView
 )
 
 from app.application.use_cases.donation_use_cases import DonationUseCases
@@ -23,6 +22,7 @@ from app.utils.websocket import manager
 from app.infrastructure.external_services.openroute import calculate_driving_distance_and_eta
 
 router = APIRouter()
+ws_router = APIRouter()
 
 # Helper to verify ObjectId strings
 def get_object_id_or_404(pk: str) -> ObjectId:
@@ -91,13 +91,8 @@ async def get_request_detail(
     donation_use_cases: DonationUseCases = Depends(get_donation_use_cases)
 ):
     try:
-        r = await donation_use_cases.get_request_detail(pk, current_user.id)
-        # get counts
-        responses = await db.db.donation_responses.find({"request_id": ObjectId(pk)}).to_list(length=1000)
-        accepted_cnt = len([x for x in responses if x.get("status") in ("accepted", "confirmed")])
-        rejected_cnt = len([x for x in responses if x.get("status") == "rejected"])
-        pending_cnt = len([x for x in responses if x.get("status") == "pending"])
-        
+        data = await donation_use_cases.get_request_detail_with_counts(pk, current_user.id)
+        r = data["request"]
         return {
             "id": r.id,
             "blood_group": r.blood_group,
@@ -117,11 +112,13 @@ async def get_request_detail(
             "hospital_latitude": r.hospital_latitude,
             "hospital_longitude": r.hospital_longitude,
             "created_at": r.created_at,
-            "total_notified": len(responses),
-            "accepted_count": accepted_cnt,
-            "rejected_count": rejected_cnt,
-            "pending_count": pending_cnt
+            "total_notified": data["total_notified"],
+            "accepted_count": data["accepted_count"],
+            "rejected_count": data["rejected_count"],
+            "pending_count": data["pending_count"]
         }
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
@@ -144,34 +141,7 @@ async def get_request_top3(
     donation_use_cases: DonationUseCases = Depends(get_donation_use_cases)
 ):
     try:
-        top_3 = await donation_use_cases.get_top_3_donors(pk, current_user.id)
-        
-        # Count helper
-        responses = await db.db.donation_responses.find({"request_id": ObjectId(pk)}).to_list(length=1000)
-        total_accepted = len([x for x in responses if x.get("status") in ("accepted", "confirmed")])
-        pending_count = len([x for x in responses if x.get("status") == "pending"])
-        rejected_count = len([x for x in responses if x.get("status") == "rejected"])
-        
-        top_3_data = []
-        for r in top_3:
-            dp = await db.db.donor_profiles.find_one({"user_id": ObjectId(r.donor_id)})
-            top_3_data.append({
-                "id": r.id,
-                "donor_id": r.donor_id,
-                "donor_name": dp.get("full_name", "") if dp else "Donor",
-                "donor_phone": dp.get("phone", "") if dp else "",
-                "status": r.status,
-                "distance_km": r.distance_km,
-                "eta_minutes": r.eta_minutes
-            })
-            
-        return {
-            "request_id": pk,
-            "top_3": top_3_data,
-            "total_accepted": total_accepted,
-            "pending_count": pending_count,
-            "rejected_count": rejected_count
-        }
+        return await donation_use_cases.get_request_top3_details(pk, current_user.id)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
@@ -184,23 +154,10 @@ async def confirm_all_top3(
 ):
     try:
         response_ids = data.get("response_ids", [])
-        confirmed = await donation_use_cases.confirm_all_top_3(pk, current_user.id, response_ids)
+        confirmed_data = await donation_use_cases.confirm_top3_and_get_details(pk, current_user.id, response_ids)
         
-        confirmed_data = []
-        for r in confirmed:
-            dp = await db.db.donor_profiles.find_one({"user_id": ObjectId(r.donor_id)})
-            confirmed_data.append({
-                "id": r.id,
-                "donor_id": r.donor_id,
-                "donor_name": dp.get("full_name", "") if dp else "Donor",
-                "donor_phone": dp.get("phone", "") if dp else "",
-                "status": r.status,
-                "distance_km": r.distance_km,
-                "eta_minutes": r.eta_minutes
-            })
-            
         return {
-            "message": f"{len(confirmed)} donor(s) confirmed.",
+            "message": f"{len(confirmed_data)} donor(s) confirmed.",
             "confirmed": confirmed_data
         }
     except ValueError as e:
@@ -209,39 +166,12 @@ async def confirm_all_top3(
 
 # ─── Donor Response Actions ───
 
-@router.get("/donor/pending-requests/")
+@router.get("/donor/pending-requests/", response_model=List[DonationResponseDonorView])
 async def get_donor_pending_requests(
     current_user: User = Depends(require_donor),
     donation_use_cases: DonationUseCases = Depends(get_donation_use_cases)
 ):
-    pending = await donation_use_cases.get_donor_pending_requests(current_user.id)
-    results = []
-    for r in pending:
-        br = await db.db.blood_requests.find_one({"_id": ObjectId(r.request_id)})
-        hp = await db.db.hospital_profiles.find_one({"user_id": ObjectId(br["hospital_id"])}) if br else None
-        
-        results.append({
-            "id": r.id,
-            "request": {
-                "id": r.request_id,
-                "blood_group": br.get("blood_group") if br else "",
-                "units_needed": br.get("units_needed") if br else 1,
-                "urgency": br.get("urgency") if br else "normal",
-                "patient_name": br.get("patient_name") if br else "",
-                "patient_condition": br.get("patient_condition") if br else "",
-                "bystander_name": br.get("bystander_name", "") if br else "",
-                "bystander_phone": br.get("bystander_phone", "") if br else "",
-                "hospital_name": hp.get("name") if hp else "Hospital",
-                "hospital_phone": hp.get("phone") if hp else "",
-                "hospital_whatsapp": hp.get("whatsapp_number") if hp else "",
-                "hospital_latitude": br.get("hospital_latitude") if br else None,
-                "hospital_longitude": br.get("hospital_longitude") if br else None,
-                "note": br.get("note") if br else ""
-            },
-            "status": r.status,
-            "created_at": r.created_at
-        })
-    return results
+    return await donation_use_cases.get_donor_pending_requests_view(current_user.id)
 
 @router.post("/responses/{pk}/respond/")
 async def respond_to_request(
@@ -253,37 +183,9 @@ async def respond_to_request(
 ):
     try:
         eta = await donation_use_cases.donor_respond(pk, current_user.id, dto)
-        if dto.status == "accepted":
-            # Schedule exact routing computation
-            bg_tasks.add_task(donation_use_cases.calculate_live_eta_background, pk)
         return {
             "message": f"Response: {dto.status}.",
             "eta_minutes": eta
-        }
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
-
-@router.patch("/responses/{pk}/location/")
-@router.post("/responses/{pk}/location/")
-async def update_response_location(
-    pk: str,
-    data: dict,
-    bg_tasks: BackgroundTasks,
-    current_user: User = Depends(require_donor),
-    donation_use_cases: DonationUseCases = Depends(get_donation_use_cases)
-):
-    lat = data.get("latitude")
-    lng = data.get("longitude")
-    if lat is None or lng is None:
-        raise HTTPException(status_code=400, detail="latitude and longitude required.")
-        
-    try:
-        dist = await donation_use_cases.update_donor_live_location(pk, current_user.id, float(lat), float(lng))
-        # Trigger background routing update
-        bg_tasks.add_task(donation_use_cases.calculate_live_eta_background, pk)
-        return {
-            "message": "Location updated.",
-            "distance_remaining_km": dist
         }
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
@@ -295,15 +197,13 @@ async def no_donation(
     donation_use_cases: DonationUseCases = Depends(get_donation_use_cases)
 ):
     try:
-        promoted = await donation_use_cases.no_donation_arrived(pk, current_user.id)
+        res = await donation_use_cases.no_donation_arrived_with_details(pk, current_user.id)
         msg = "Marked arrived (no donation, no cooldown)."
-        if promoted:
-            dp = await db.db.donor_profiles.find_one({"user_id": ObjectId(promoted.donor_id)})
-            name = dp.get("full_name", "") if dp else "Next donor"
-            msg += f" Next donor {name} auto-confirmed."
+        if res["promoted"]:
+            msg += f" Next donor {res['promoted_name']} auto-confirmed."
         return {
             "message": msg,
-            "promoted": bool(promoted)
+            "promoted": res["promoted"]
         }
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
@@ -315,15 +215,13 @@ async def cancel_response(
     donation_use_cases: DonationUseCases = Depends(get_donation_use_cases)
 ):
     try:
-        promoted = await donation_use_cases.cancel_donor_assignment(pk, current_user.id)
+        res = await donation_use_cases.cancel_donor_assignment_with_details(pk, current_user.id)
         msg = "Donor cancelled."
-        if promoted:
-            dp = await db.db.donor_profiles.find_one({"user_id": ObjectId(promoted.donor_id)})
-            name = dp.get("full_name", "") if dp else "Next donor"
-            msg += f" {name} auto-promoted as replacement."
+        if res["promoted"]:
+            msg += f" {res['promoted_name']} auto-promoted as replacement."
         return {
             "message": msg,
-            "promoted": bool(promoted)
+            "promoted": res["promoted"]
         }
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
@@ -345,84 +243,26 @@ async def complete_donation(
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
-@router.get("/donor/responses/")
+@router.get("/donor/responses/", response_model=List[DonationResponseDonorView])
 async def list_donor_responses(
     current_user: User = Depends(require_donor),
     donation_use_cases: DonationUseCases = Depends(get_donation_use_cases)
 ):
-    # Retrieve all donor responses
-    resps = await db.db.donation_responses.find({"donor_id": ObjectId(current_user.id)}).sort("created_at", -1).to_list(length=1000)
-    results = []
-    for r in resps:
-        br = await db.db.blood_requests.find_one({"_id": r["request_id"]})
-        hp = await db.db.hospital_profiles.find_one({"user_id": br["hospital_id"]}) if br else None
-        
-        results.append({
-            "id": str(r["_id"]),
-            "request": {
-                "id": str(r["request_id"]),
-                "blood_group": br.get("blood_group") if br else "",
-                "units_needed": br.get("units_needed") if br else 1,
-                "urgency": br.get("urgency") if br else "normal",
-                "patient_name": br.get("patient_name") if br else "",
-                "patient_condition": br.get("patient_condition") if br else "",
-                "bystander_name": br.get("bystander_name", "") if br else "",
-                "bystander_phone": br.get("bystander_phone", "") if br else "",
-                "hospital_name": hp.get("name") if hp else "Hospital",
-                "hospital_phone": hp.get("phone") if hp else "",
-                "hospital_whatsapp": hp.get("whatsapp_number") if hp else "",
-                "hospital_latitude": br.get("hospital_latitude") if br else None,
-                "hospital_longitude": br.get("hospital_longitude") if br else None,
-                "note": br.get("note") if br else ""
-            },
-            "status": r.get("status"),
-            "created_at": r.get("created_at")
-        })
-    return results
+    return await donation_use_cases.list_donor_responses_view(current_user.id)
 
 @router.get("/donor/history/")
 async def list_donor_history(
     current_user: User = Depends(require_donor),
     donation_use_cases: DonationUseCases = Depends(get_donation_use_cases)
 ):
-    records = await db.db.donation_records.find({"donor_id": ObjectId(current_user.id)}).sort("donated_at", -1).to_list(length=1000)
-    results = []
-    for r in records:
-        results.append({
-            "id": str(r["_id"]),
-            "blood_group": r.get("blood_group"),
-            "units_donated": r.get("units_donated", 1),
-            "hospital_name": r.get("hospital_name"),
-            "hospital_city": r.get("hospital_city"),
-            "donated_at": r.get("donated_at"),
-            "notes": r.get("notes")
-        })
-    return results
+    return await donation_use_cases.get_donor_history(current_user.id)
 
 @router.get("/donor/cooldown/")
 async def get_cooldown_status(
-    current_user: User = Depends(require_donor)
+    current_user: User = Depends(require_donor),
+    donation_use_cases: DonationUseCases = Depends(get_donation_use_cases)
 ):
-    last = await db.db.donation_records.find_one({"donor_id": ObjectId(current_user.id)}, sort=[("donated_at", -1)])
-    if not last:
-        return {
-            "is_on_cooldown": False,
-            "last_donation": None,
-            "cooldown_until": None,
-            "days_remaining": 0
-        }
-        
-    now = datetime.utcnow()
-    cd_until = last.get("cooldown_until")
-    on_cd = now < cd_until if cd_until else False
-    days = max(0, (cd_until - now).days) if on_cd else 0
-    
-    return {
-        "is_on_cooldown": on_cd,
-        "last_donation": last.get("donated_at"),
-        "cooldown_until": cd_until,
-        "days_remaining": days
-    }
+    return await donation_use_cases.get_donor_cooldown_status(current_user.id)
 
 
 # ─── Dashboard & Analytics ───
@@ -432,65 +272,7 @@ async def get_hospital_dashboard(
     current_user: User = Depends(require_hospital),
     donation_use_cases: DonationUseCases = Depends(get_donation_use_cases)
 ):
-    data = await donation_use_cases.get_hospital_dashboard(current_user.id)
-    
-    formatted_active = []
-    for item in data["active_requests"]:
-        br = item["request"]
-        top_3 = item["top_3"]
-        confirmed_donors = item["confirmed_donors"]
-        
-        top_3_list = []
-        for r in top_3:
-            dp = await db.db.donor_profiles.find_one({"user_id": ObjectId(r.donor_id)})
-            top_3_list.append({
-                "id": r.id,
-                "donor_id": r.donor_id,
-                "donor_name": dp.get("full_name", "") if dp else "Donor",
-                "donor_phone": dp.get("phone", "") if dp else "",
-                "status": r.status,
-                "distance_km": r.distance_km,
-                "eta_minutes": r.eta_minutes
-            })
-            
-        confirmed_list = []
-        for r in confirmed_donors:
-            dp = await db.db.donor_profiles.find_one({"user_id": ObjectId(r.donor_id)})
-            confirmed_list.append({
-                "id": r.id,
-                "donor_id": r.donor_id,
-                "donor_name": dp.get("full_name", "") if dp else "Donor",
-                "donor_phone": dp.get("phone", "") if dp else "",
-                "status": r.status,
-                "distance_km": r.distance_km,
-                "eta_minutes": r.eta_minutes
-            })
-            
-        formatted_active.append({
-            "request": {
-                "id": br.id,
-                "blood_group": br.blood_group,
-                "units_needed": br.units_needed,
-                "urgency": br.urgency,
-                "status": br.status,
-                "patient_name": br.patient_name,
-                "patient_condition": br.patient_condition,
-                "bystander_name": br.bystander_name,
-                "bystander_phone": br.bystander_phone,
-                "created_at": br.created_at
-            },
-            "top_3": top_3_list,
-            "total_notified": item["total_notified"],
-            "accepted_count": item["accepted_count"],
-            "rejected_count": item["rejected_count"],
-            "pending_count": item["pending_count"],
-            "confirmed_donors": confirmed_list
-        })
-        
-    return {
-        "stats": data["stats"],
-        "active_requests": formatted_active
-    }
+    return await donation_use_cases.get_hospital_dashboard_formatted(current_user.id)
 
 @router.get("/tv/{hospital_id}/")
 async def get_tv_data(
@@ -534,94 +316,6 @@ async def get_analytics(
     return await donation_use_cases.get_analytics(current_user.id)
 
 
-# ─── Chat ───
-
-@router.get("/chat/{response_id}/messages/")
-async def get_chat_history(
-    response_id: str,
-    current_user: User = Depends(get_current_user),
-    donation_use_cases: DonationUseCases = Depends(get_donation_use_cases)
-):
-    try:
-        resp, messages = await donation_use_cases.get_chat_history(response_id, current_user.id)
-        results = []
-        for m in messages:
-            # Resolve sender name
-            sender_name = "User"
-            sender_role = "donor"
-            sender_doc = await db.db.users.find_one({"_id": ObjectId(m.sender_id)})
-            if sender_doc:
-                sender_role = sender_doc.get("role", "donor")
-                if sender_role == "donor":
-                    dp = await db.db.donor_profiles.find_one({"user_id": sender_doc["_id"]})
-                    sender_name = dp.get("full_name", "") if dp else "Donor"
-                elif sender_role == "hospital":
-                    hp = await db.db.hospital_profiles.find_one({"user_id": sender_doc["_id"]})
-                    sender_name = hp.get("name", "") if hp else "Hospital"
-            results.append({
-                "id": m.id,
-                "sender_id": m.sender_id,
-                "sender_name": sender_name,
-                "sender_role": sender_role,
-                "message": m.message,
-                "created_at": m.created_at,
-                "is_read": m.is_read
-            })
-        return results
-    except ValueError as e:
-        raise HTTPException(status_code=403, detail=str(e))
-
-@router.post("/chat/{response_id}/messages/", status_code=status.HTTP_201_CREATED)
-async def post_chat_message(
-    response_id: str,
-    data: dict,
-    current_user: User = Depends(get_current_user),
-    donation_use_cases: DonationUseCases = Depends(get_donation_use_cases)
-):
-    text = data.get("message", "").strip()
-    if not text:
-        raise HTTPException(status_code=400, detail="Message cannot be empty.")
-        
-    try:
-        msg = await donation_use_cases.create_chat_message(response_id, current_user.id, current_user.role, text)
-        return {
-            "id": msg.id,
-            "sender_id": msg.sender_id,
-            "message": msg.message,
-            "created_at": msg.created_at,
-            "is_read": msg.is_read
-        }
-    except ValueError as e:
-        raise HTTPException(status_code=403, detail=str(e))
-
-@router.get("/chat/unread/")
-async def get_unread_chat(
-    current_user: User = Depends(get_current_user)
-):
-    # Find responses where user is sender/receiver
-    if current_user.role == "donor":
-        resps = await db.db.donation_responses.find({"donor_id": ObjectId(current_user.id)}).to_list(length=1000)
-    else:
-        reqs = await db.db.blood_requests.find({"hospital_id": ObjectId(current_user.id)}).to_list(length=1000)
-        req_ids = [r["_id"] for r in reqs]
-        resps = await db.db.donation_responses.find({"request_id": {"$in": req_ids}}).to_list(length=1000)
-        
-    resp_ids = [str(r["_id"]) for r in resps]
-    pipeline = [
-        {"$match": {
-            "response_id": {"$in": resp_ids},
-            "is_read": False,
-            "sender_id": {"$ne": ObjectId(current_user.id)}
-        }},
-        {"$group": {
-            "_id": "$response_id",
-            "unread": {"$sum": 1}
-        }}
-    ]
-    cursor = db.db.chat_messages.aggregate(pipeline)
-    counts = await cursor.to_list(length=1000)
-    return {str(c["_id"]): c["unread"] for c in counts}
-
 
 # ─── Rating & Badges ───
 
@@ -662,34 +356,7 @@ async def list_active_camps(
     blood_group: Optional[str] = Query(None),
     donation_use_cases: DonationUseCases = Depends(get_donation_use_cases)
 ):
-    camps = await donation_use_cases.list_active_camps(city, blood_group)
-    results = []
-    for c in camps:
-        # Load registered count
-        count = await db.db.camp_registrations.count_documents({"camp_id": ObjectId(c.id), "status": "registered"})
-        
-        hp = await db.db.hospital_profiles.find_one({"user_id": ObjectId(c.hospital_id)})
-        hospital_name = hp.get("name") if hp else "Hospital"
-        
-        results.append({
-            "id": c.id,
-            "title": c.title,
-            "description": c.description,
-            "location": c.location,
-            "city": c.city,
-            "state": c.state,
-            "latitude": c.latitude,
-            "longitude": c.longitude,
-            "scheduled_date": c.scheduled_date.isoformat(),
-            "start_time": c.start_time,
-            "end_time": c.end_time,
-            "capacity": c.capacity,
-            "target_blood_groups": c.target_blood_groups,
-            "registered_count": count,
-            "is_full": count >= c.capacity,
-            "hospital_name": hospital_name
-        })
-    return results
+    return await donation_use_cases.list_active_camps_formatted(city, blood_group)
 
 @router.post("/camps/", status_code=status.HTTP_201_CREATED)
 async def create_camp(
@@ -738,46 +405,14 @@ async def get_my_camp_registrations(
     current_user: User = Depends(require_donor),
     donation_use_cases: DonationUseCases = Depends(get_donation_use_cases)
 ):
-    regs = await donation_use_cases.get_donor_camp_registrations(current_user.id)
-    results = []
-    for r in regs:
-        c = await db.db.blood_camps.find_one({"_id": ObjectId(r.camp_id)})
-        if c:
-            hp = await db.db.hospital_profiles.find_one({"user_id": c["hospital_id"]})
-            hospital_name = hp.get("name") if hp else "Hospital"
-            results.append({
-                "id": r.id,
-                "camp": {
-                    "id": str(c["_id"]),
-                    "title": c.get("title"),
-                    "location": c.get("location"),
-                    "scheduled_date": c.get("scheduled_date").isoformat() if isinstance(c.get("scheduled_date"), datetime) else str(c.get("scheduled_date")),
-                    "hospital_name": hospital_name
-                },
-                "status": r.status,
-                "registered_at": r.registered_at
-            })
-    return results
+    return await donation_use_cases.get_donor_camp_registrations_formatted(current_user.id)
 
 @router.get("/my/camps/")
 async def get_hospital_camps(
     current_user: User = Depends(require_hospital),
     donation_use_cases: DonationUseCases = Depends(get_donation_use_cases)
 ):
-    camps = await donation_use_cases.get_hospital_camps(current_user.id)
-    results = []
-    for c in camps:
-        count = await db.db.camp_registrations.count_documents({"camp_id": ObjectId(c.id), "status": "registered"})
-        results.append({
-            "id": c.id,
-            "title": c.title,
-            "location": c.location,
-            "scheduled_date": c.scheduled_date.isoformat(),
-            "capacity": c.capacity,
-            "registered_count": count,
-            "is_full": count >= c.capacity
-        })
-    return results
+    return await donation_use_cases.get_hospital_camps_formatted(current_user.id)
 
 
 # ─── Directions and Notifications ───
@@ -841,7 +476,7 @@ async def clear_hospital_data(
 
 # ─── WebSocket Endpoint ───
 
-@router.websocket("/ws/donation/")
+@ws_router.websocket("/ws/donation/")
 async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(None)):
     if not token:
         logger.warning("WebSocket connection rejected: No token query parameter provided.")
@@ -861,18 +496,20 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
         await websocket.close(code=4001)
         return
         
-    user_doc = await db.db.users.find_one({"_id": ObjectId(user_id)})
-    if not user_doc:
+    from app.dependencies.db_repos import get_user_repository
+    user_repo = get_user_repository()
+    user = await user_repo.get_by_id(user_id)
+    if not user:
         logger.warning(f"WebSocket connection rejected: User ID '{user_id}' not found in the database.")
         await websocket.close(code=4001)
         return
         
-    if not user_doc.get("is_active"):
+    if not user.is_active:
         logger.warning(f"WebSocket connection rejected: User '{user_id}' is marked as inactive.")
         await websocket.close(code=4001)
         return
         
-    user_role = user_doc.get("role")
+    user_role = user.role
     if user_role == "hospital":
         group_name = f"hospital_{user_id}"
     elif user_role == "donor":
@@ -909,25 +546,7 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
             data = await websocket.receive_json()
             msg_type = data.get("type")
             
-            if msg_type == "join_chat":
-                response_id = data.get("response_id")
-                if response_id:
-                    room = f"chat_{response_id}"
-                    await manager.connect(websocket, room)
-                    joined_rooms.add(room)
-                    await websocket.send_json({
-                        "type": "chat_joined",
-                        "response_id": response_id
-                    })
-                    
-            elif msg_type == "leave_chat":
-                response_id = data.get("response_id")
-                if response_id:
-                    room = f"chat_{response_id}"
-                    manager.disconnect(websocket, room)
-                    joined_rooms.discard(room)
-                    
-            elif msg_type == "ping":
+            if msg_type == "ping":
                 await websocket.send_json({"type": "pong"})
                 
     except WebSocketDisconnect:

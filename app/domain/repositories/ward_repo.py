@@ -21,6 +21,10 @@ class WardRepository(ABC):
     async def search_wards(self, filters: dict, has_member: bool = False) -> List[Ward]:
         pass
 
+    @abstractmethod
+    async def list_all(self) -> List[Ward]:
+        pass
+
 
 class WardMemberRepository(ABC):
     @abstractmethod
@@ -47,6 +51,14 @@ class WardMemberRepository(ABC):
     async def search_members(self, filters: dict, limit: int = 10) -> List[WardMember]:
         pass
 
+    @abstractmethod
+    async def list_all(self) -> List[WardMember]:
+        pass
+
+    @abstractmethod
+    async def get_members_by_ward(self, ward_id: str) -> List[WardMember]:
+        pass
+
 
 class WardBloodAlertRepository(ABC):
     @abstractmethod
@@ -67,6 +79,10 @@ class WardBloodAlertRepository(ABC):
 
     @abstractmethod
     async def list_by_member(self, ward_member_id: str, status: Optional[str] = None) -> List[WardBloodAlert]:
+        pass
+
+    @abstractmethod
+    async def get_by_blood_request_id(self, request_id: str) -> Optional[WardBloodAlert]:
         pass
 
 

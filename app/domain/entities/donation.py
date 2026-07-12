@@ -83,16 +83,6 @@ class DonationRecord:
     cooldown_until: Optional[datetime] = None
     notes: str = ""
     created_at: datetime = field(default_factory=datetime.utcnow)
-
-@dataclass
-class ChatMessage:
-    id: Optional[str] = None
-    response_id: str = ""
-    sender_id: str = ""
-    message: str = ""
-    is_read: bool = False
-    created_at: datetime = field(default_factory=datetime.utcnow)
-
 @dataclass
 class DonorRating:
     id: Optional[str] = None
