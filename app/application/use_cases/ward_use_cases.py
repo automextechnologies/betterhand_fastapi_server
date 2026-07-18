@@ -89,6 +89,19 @@ class WardUseCases:
             designation=dto.designation or ""
         )
         await self.ward_member_repo.create(member)
+        
+        # Map matching donors to this new ward member
+        if ward.district and ward.local_body_type and ward.local_body_name and ward.ward_number:
+            matching_donors = await self.donor_repo.list_by_ward_mapping(
+                district=ward.district,
+                local_body_type=ward.local_body_type,
+                local_body_name=ward.local_body_name,
+                ward_number=ward.ward_number
+            )
+            for donor in matching_donors:
+                donor.ward_member_id = member.id
+                await self.donor_repo.update(donor)
+                
         return created_user
 
     async def get_ward_member_profile(self, user_id: str) -> Tuple[WardMember, Optional[Ward]]:
@@ -120,7 +133,8 @@ class WardUseCases:
         donors = await self.donor_repo.list_by_ward(
             state=ward.state,
             local_body_name=ward.local_body_name,
-            ward_number=ward.ward_number
+            ward_number=ward.ward_number,
+            ward_member_id=member.id
         )
         
         top_donors = []
@@ -211,32 +225,48 @@ class WardUseCases:
             ward_number=ward.ward_number,
             is_available=True,
             user_ids=donor_ids,
-            blood_group=alert.blood_group
+            blood_group=alert.blood_group,
+            ward_member_id=wm.id
         )
         
         n = 0
         for d in donors:
             donor_user_id = d.user_id
             
-            # Check cooldown
-            last_record = await self.record_repo.get_last_for_donor(donor_user_id)
-            if last_record and last_record.donated_at >= cooldown_cutoff:
-                continue # on cooldown, skip
+            # Check cooldown only if broadcasting to all (donor_ids is None)
+            if donor_ids is None:
+                last_record = await self.record_repo.get_last_for_donor(donor_user_id)
+                if last_record and last_record.donated_at >= cooldown_cutoff:
+                    continue # on cooldown, skip
                 
-            # Create WardDonorNotification
-            await self.ward_notif_repo.get_or_create(
+            # Create or update WardDonorNotification
+            wn, wn_created = await self.ward_notif_repo.get_or_create(
                 alert_id=alert.id,
                 donor_id=donor_user_id,
                 defaults={"status": "pending", "contacted_at": datetime.utcnow()}
             )
+            if not wn_created:
+                if wn.status not in ("accepted", "confirmed", "completed"):
+                    wn.status = "pending"
+                    wn.contacted_at = datetime.utcnow()
+                    await self.ward_notif_repo.update(wn)
             
+            should_notify = True
             if br:
                 resp, created = await self.response_repo.get_or_create(
                     request_id=br.id,
                     donor_id=donor_user_id,
                     defaults={"status": "pending", "notification_sent_at": datetime.utcnow()}
                 )
-                if created:
+                if not created:
+                    if resp.status not in ("accepted", "confirmed", "completed"):
+                        resp.status = "pending"
+                        resp.notification_sent_at = datetime.utcnow()
+                        await self.response_repo.update(resp)
+                    else:
+                        should_notify = False
+                
+                if should_notify:
                     # WebSocket push to donor
                     self.ws_broadcast(f"donor_{donor_user_id}", "new_request", {
                         "response_id": resp.id,
@@ -250,15 +280,16 @@ class WardUseCases:
                         "ward_member_name": wm.full_name
                     })
                     
-            donor_user = await self.user_repo.get_by_id(user_id=donor_user_id)
-            if donor_user and donor_user.fcm_token:
-                send_push_notification(
-                    fcm_token=donor_user.fcm_token,
-                    title=f"🩸 Ward Alert — {alert.blood_group}",
-                    body=f"{wm.full_name} requests {alert.blood_group} for {alert.hospital_name}.",
-                    data={"type": "ward_blood_alert", "alert_id": str(alert.id)}
-                )
-            n += 1
+            if should_notify:
+                donor_user = await self.user_repo.get_by_id(user_id=donor_user_id)
+                if donor_user and donor_user.fcm_token:
+                    send_push_notification(
+                        fcm_token=donor_user.fcm_token,
+                        title=f"🩸 Ward Alert — {alert.blood_group}",
+                        body=f"{wm.full_name} requests {alert.blood_group} for {alert.hospital_name}.",
+                        data={"type": "ward_blood_alert", "alert_id": str(alert.id)}
+                    )
+                n += 1
             
         alert.status = "notified"
         await self.ward_alert_repo.update(alert)
@@ -434,16 +465,20 @@ class WardUseCases:
         wards = await self.ward_repo.search_wards(filters, has_member=has_member)
         results = []
         for w in wards:
+            # Return all members registered to this ward.
+            # The hospital form displays is_verified so the user can see who is
+            # active. The notification pipeline enforces verified-only separately.
             members = await self.ward_member_repo.get_members_by_ward(w.id)
-            members_data = []
-            for m in members:
-                members_data.append({
+            members_data = [
+                {
                     "id": m.id,
                     "full_name": m.full_name,
                     "phone": m.phone,
                     "designation": m.designation,
                     "is_verified": m.is_verified
-                })
+                }
+                for m in members
+            ]
             results.append({
                 "id": w.id,
                 "ward_number": w.ward_number,

@@ -63,6 +63,30 @@ class DonationUseCases:
         self.notif_repo = notif_repo
         self.ws_broadcast = ws_broadcast_func or (lambda g, ev, p: None)
 
+    def _resolve_and_calculate_distance(
+        self,
+        br_lat: Optional[float],
+        br_lng: Optional[float],
+        r_lat: Optional[float],
+        r_lng: Optional[float],
+        hp_lat: Optional[float],
+        hp_lng: Optional[float],
+        dp_lat: Optional[float],
+        dp_lng: Optional[float],
+        stored_distance: Optional[float]
+    ) -> Optional[float]:
+        h_lat = hp_lat if hp_lat is not None else br_lat
+        h_lng = hp_lng if hp_lng is not None else br_lng
+        d_lat = r_lat if r_lat is not None else dp_lat
+        d_lng = r_lng if r_lng is not None else dp_lng
+        
+        if h_lat is not None and h_lng is not None and d_lat is not None and d_lng is not None:
+            try:
+                return round(haversine_distance(h_lat, h_lng, d_lat, d_lng), 2)
+            except Exception:
+                pass
+        return stored_distance
+
     async def create_blood_request(self, hospital_user_id: str, dto: BloodRequestCreateDTO) -> BloodRequest:
         hospital_profile = await self.hospital_repo.get_by_user_id(hospital_user_id)
         if not hospital_profile:
@@ -117,6 +141,12 @@ class DonationUseCases:
         hospital_profile = await self.hospital_repo.get_by_user_id(br.hospital_id)
         hospital_name = hospital_profile.name if hospital_profile else "Hospital"
         
+        # Synchronize coordinates in the blood request if they mismatch
+        if hospital_profile and (br.hospital_latitude != hospital_profile.latitude or br.hospital_longitude != hospital_profile.longitude):
+            br.hospital_latitude = hospital_profile.latitude
+            br.hospital_longitude = hospital_profile.longitude
+            await self.request_repo.update(br)
+            
         # 1. NOTIFY DONORS
         cooldown_cutoff = (datetime.utcnow() - timedelta(days=settings.DONOR_COOLDOWN_DAYS)).isoformat()
         
@@ -143,10 +173,13 @@ class DonationUseCases:
         notified_donors = 0
         for dp in donors:
             dist = 0.0
-            if br.hospital_latitude and br.hospital_longitude and dp.latitude and dp.longitude:
+            h_lat = hospital_profile.latitude if hospital_profile else br.hospital_latitude
+            h_lng = hospital_profile.longitude if hospital_profile else br.hospital_longitude
+            
+            if h_lat is not None and h_lng is not None and dp.latitude is not None and dp.longitude is not None:
                 try:
                     dist = round(haversine_distance(
-                        br.hospital_latitude, br.hospital_longitude,
+                        h_lat, h_lng,
                         dp.latitude, dp.longitude
                     ), 2)
                 except Exception:
@@ -354,6 +387,18 @@ class DonationUseCases:
                 await self.response_repo.update(resp)
                 confirmed.append(resp)
                 
+                # Persist Notification in DB
+                new_notif = Notification(
+                    recipient_id=resp.donor_id,
+                    request_id=br.id,
+                    channel="push",
+                    subject="✅ You are CONFIRMED!",
+                    body=f"{hospital_name} selected you. Head to hospital now!",
+                    status="sent",
+                    sent_at=datetime.utcnow()
+                )
+                await self.notif_repo.create(new_notif)
+                
                 # Push Notification to donor
                 donor_user = await self.user_repo.get_by_id(resp.donor_id)
                 if donor_user and donor_user.fcm_token:
@@ -390,8 +435,57 @@ class DonationUseCases:
                         "eta_minutes": resp.eta_minutes
                     })
                     
+                # Update ward donor notification status if this was initiated by a ward member
+                try:
+                    alert = await self.ward_alert_repo.get_by_blood_request_id(br.id)
+                    if alert:
+                        wn_tuple = await self.ward_notif_repo.get_or_create(
+                            alert_id=alert.id,
+                            donor_id=resp.donor_id,
+                            defaults={"status": "confirmed", "contacted_at": datetime.utcnow()}
+                        )
+                        wn, wn_created = wn_tuple
+                        if not wn_created:
+                            wn.status = "confirmed"
+                            await self.ward_notif_repo.update(wn)
+                            
+                        # Broadcast real-time status update to ward member
+                        self.ws_broadcast(f"ward_{alert.ward_member_id}", "donor_responded", {
+                            "alert_id": alert.id,
+                            "donor_id": resp.donor_id,
+                            "donor_name": dp.full_name if dp else "Donor",
+                            "status": "confirmed"
+                        })
+                except Exception:
+                    pass
+                    
         # Mark all other accepted responses as "missed"
         confirmed_ids = [r.id for r in confirmed]
+        
+        try:
+            alert = await self.ward_alert_repo.get_by_blood_request_id(br.id)
+            if alert:
+                all_resps = await self.response_repo.list_by_request(br.id)
+                for other in all_resps:
+                    if other.id not in confirmed_ids and other.status == "accepted":
+                        wn_tuple = await self.ward_notif_repo.get_or_create(
+                            alert_id=alert.id,
+                            donor_id=other.donor_id,
+                            defaults={"status": "missed", "contacted_at": datetime.utcnow()}
+                        )
+                        wn, wn_created = wn_tuple
+                        if not wn_created:
+                            wn.status = "missed"
+                            await self.ward_notif_repo.update(wn)
+                            
+                        self.ws_broadcast(f"ward_{alert.ward_member_id}", "donor_responded", {
+                            "alert_id": alert.id,
+                            "donor_id": other.donor_id,
+                            "status": "missed"
+                        })
+        except Exception:
+            pass
+            
         await self.response_repo.update_status_by_query(
             {"request_id": br.id, "status": "accepted", "id": {"$nin": confirmed_ids}},
             "missed"
@@ -437,6 +531,30 @@ class DonationUseCases:
         resp.status = "completed"
         await self.response_repo.update(resp)
         
+        # Update ward donor notification status if this was initiated by a ward member
+        try:
+            alert = await self.ward_alert_repo.get_by_blood_request_id(br.id)
+            if alert:
+                wn_tuple = await self.ward_notif_repo.get_or_create(
+                    alert_id=alert.id,
+                    donor_id=resp.donor_id,
+                    defaults={"status": "completed", "contacted_at": datetime.utcnow()}
+                )
+                wn, wn_created = wn_tuple
+                if not wn_created:
+                    wn.status = "completed"
+                    await self.ward_notif_repo.update(wn)
+                    
+                # Broadcast real-time status update to ward member
+                self.ws_broadcast(f"ward_{alert.ward_member_id}", "donor_responded", {
+                    "alert_id": alert.id,
+                    "donor_id": resp.donor_id,
+                    "donor_name": donor_user.full_name if 'donor_user' in locals() and donor_user else "Donor",
+                    "status": "completed"
+                })
+        except Exception:
+            pass
+        
         # Update request completed count
         all_resps = await self.response_repo.list_by_request(br.id)
         br.completed_donations_count = len([r for r in all_resps if r.status == "completed"])
@@ -448,6 +566,27 @@ class DonationUseCases:
                 if other.status == "confirmed" and other.id != resp.id:
                     other.status = "not_needed"
                     await self.response_repo.update(other)
+                    
+                    try:
+                        alert = await self.ward_alert_repo.get_by_blood_request_id(br.id)
+                        if alert:
+                            wn_tuple = await self.ward_notif_repo.get_or_create(
+                                alert_id=alert.id,
+                                donor_id=other.donor_id,
+                                defaults={"status": "not_needed", "contacted_at": datetime.utcnow()}
+                            )
+                            wn, wn_created = wn_tuple
+                            if not wn_created:
+                                wn.status = "not_needed"
+                                await self.ward_notif_repo.update(wn)
+                                
+                            self.ws_broadcast(f"ward_{alert.ward_member_id}", "donor_responded", {
+                                "alert_id": alert.id,
+                                "donor_id": other.donor_id,
+                                "status": "not_needed"
+                            })
+                    except Exception:
+                        pass
                     
                     other_donor = await self.user_repo.get_by_id(other.donor_id)
                     if other_donor and other_donor.fcm_token:
@@ -534,6 +673,27 @@ class DonationUseCases:
         resp.status = "not_needed"
         await self.response_repo.update(resp)
         
+        try:
+            alert = await self.ward_alert_repo.get_by_blood_request_id(br.id)
+            if alert:
+                wn_tuple = await self.ward_notif_repo.get_or_create(
+                    alert_id=alert.id,
+                    donor_id=resp.donor_id,
+                    defaults={"status": "not_needed", "contacted_at": datetime.utcnow()}
+                )
+                wn, wn_created = wn_tuple
+                if not wn_created:
+                    wn.status = "not_needed"
+                    await self.ward_notif_repo.update(wn)
+                    
+                self.ws_broadcast(f"ward_{alert.ward_member_id}", "donor_responded", {
+                    "alert_id": alert.id,
+                    "donor_id": resp.donor_id,
+                    "status": "not_needed"
+                })
+        except Exception:
+            pass
+        
         # Check if all confirmed are resolved
         all_resps = await self.response_repo.list_by_request(br.id)
         remaining = len([r for r in all_resps if r.status == "confirmed"])
@@ -567,6 +727,27 @@ class DonationUseCases:
         resp.status = "arrived_no_donation"
         await self.response_repo.update(resp)
         
+        try:
+            alert = await self.ward_alert_repo.get_by_blood_request_id(br.id)
+            if alert:
+                wn_tuple = await self.ward_notif_repo.get_or_create(
+                    alert_id=alert.id,
+                    donor_id=resp.donor_id,
+                    defaults={"status": "arrived_no_donation", "contacted_at": datetime.utcnow()}
+                )
+                wn, wn_created = wn_tuple
+                if not wn_created:
+                    wn.status = "arrived_no_donation"
+                    await self.ward_notif_repo.update(wn)
+                    
+                self.ws_broadcast(f"ward_{alert.ward_member_id}", "donor_responded", {
+                    "alert_id": alert.id,
+                    "donor_id": resp.donor_id,
+                    "status": "arrived_no_donation"
+                })
+        except Exception:
+            pass
+        
         all_resps = await self.response_repo.list_by_request(br.id)
         confirmed_ids = [r.id for r in all_resps if r.status == "confirmed"]
         
@@ -585,6 +766,27 @@ class DonationUseCases:
         was_confirmed = resp.status == "confirmed"
         resp.status = "cancelled"
         await self.response_repo.update(resp)
+        
+        try:
+            alert = await self.ward_alert_repo.get_by_blood_request_id(br.id)
+            if alert:
+                wn_tuple = await self.ward_notif_repo.get_or_create(
+                    alert_id=alert.id,
+                    donor_id=resp.donor_id,
+                    defaults={"status": "cancelled", "contacted_at": datetime.utcnow()}
+                )
+                wn, wn_created = wn_tuple
+                if not wn_created:
+                    wn.status = "cancelled"
+                    await self.ward_notif_repo.update(wn)
+                    
+                self.ws_broadcast(f"ward_{alert.ward_member_id}", "donor_responded", {
+                    "alert_id": alert.id,
+                    "donor_id": resp.donor_id,
+                    "status": "cancelled"
+                })
+        except Exception:
+            pass
         
         donor_user = await self.user_repo.get_by_id(resp.donor_id)
         if donor_user and donor_user.fcm_token:
@@ -667,10 +869,19 @@ class DonationUseCases:
                 dp.longitude = lng
                 await self.donor_repo.update(dp)
                 
-            if lat is not None and br.hospital_latitude is not None:
+            hospital_profile = await self.hospital_repo.get_by_user_id(br.hospital_id)
+            h_lat = hospital_profile.latitude if hospital_profile else br.hospital_latitude
+            h_lng = hospital_profile.longitude if hospital_profile else br.hospital_longitude
+            
+            if hospital_profile and (br.hospital_latitude != hospital_profile.latitude or br.hospital_longitude != hospital_profile.longitude):
+                br.hospital_latitude = hospital_profile.latitude
+                br.hospital_longitude = hospital_profile.longitude
+                await self.request_repo.update(br)
+                
+            if lat is not None and h_lat is not None:
                 try:
                     resp.distance_km = round(haversine_distance(
-                        br.hospital_latitude, br.hospital_longitude,
+                        h_lat, h_lng,
                         lat, lng
                     ), 2)
                 except Exception:
@@ -681,7 +892,10 @@ class DonationUseCases:
                 await self.request_repo.update(br)
                 
             # ETA calculation
-            if resp.distance_km:
+            if dto.eta_minutes is not None:
+                eta_minutes = dto.eta_minutes
+                resp.eta_minutes = eta_minutes
+            elif resp.distance_km:
                 eta_minutes = max(1, int(float(resp.distance_km) / 40 * 60)) # default 40 km/h
                 resp.eta_minutes = eta_minutes
         else:
@@ -701,6 +915,30 @@ class DonationUseCases:
             "donor_longitude": str(resp.donor_longitude or "")
         })
         
+        # Update ward donor notification status if this was initiated by a ward member
+        try:
+            alert = await self.ward_alert_repo.get_by_blood_request_id(br.id)
+            if alert:
+                wn_tuple = await self.ward_notif_repo.get_or_create(
+                    alert_id=alert.id,
+                    donor_id=donor_id,
+                    defaults={"status": dto.status, "contacted_at": datetime.utcnow()}
+                )
+                wn, wn_created = wn_tuple
+                if not wn_created:
+                    wn.status = dto.status
+                    await self.ward_notif_repo.update(wn)
+                    
+                # Broadcast real-time status update to ward member
+                self.ws_broadcast(f"ward_{alert.ward_member_id}", "donor_responded", {
+                    "alert_id": alert.id,
+                    "donor_id": donor_id,
+                    "donor_name": dp.full_name,
+                    "status": dto.status
+                })
+        except Exception as e:
+            pass
+            
         return eta_minutes or 0
 
 
@@ -949,6 +1187,8 @@ class DonationUseCases:
 
     async def get_request_top3_details(self, request_id: str, hospital_id: str) -> dict:
         top_3 = await self.get_top_3_donors(request_id, hospital_id)
+        hospital_profile = await self.hospital_repo.get_by_user_id(hospital_id)
+        br = await self.request_repo.get_by_id(request_id)
         
         responses = await self.response_repo.list_by_request(request_id)
         total_accepted = len([x for x in responses if x.status in ("accepted", "confirmed")])
@@ -958,14 +1198,37 @@ class DonationUseCases:
         top_3_data = []
         for r in top_3:
             dp = await self.donor_repo.get_by_user_id(r.donor_id)
+            avg_rating = await self.rating_repo.get_avg_rating_for_donor(r.donor_id)
+            total_donations = await self.record_repo.count_by_donor(r.donor_id)
+            all_resps = await self.response_repo.list_history_for_donor(r.donor_id)
+            responded = [x for x in all_resps if x.status in ("accepted", "confirmed", "completed", "rejected")]
+            accepted = [x for x in responded if x.status in ("accepted", "confirmed", "completed")]
+            acceptance_rate = int(len(accepted) / len(responded) * 100) if responded else 0
+            
+            dist = self._resolve_and_calculate_distance(
+                br_lat=br.hospital_latitude if br else None,
+                br_lng=br.hospital_longitude if br else None,
+                r_lat=r.donor_latitude,
+                r_lng=r.donor_longitude,
+                hp_lat=hospital_profile.latitude if hospital_profile else None,
+                hp_lng=hospital_profile.longitude if hospital_profile else None,
+                dp_lat=dp.latitude if dp else None,
+                dp_lng=dp.longitude if dp else None,
+                stored_distance=r.distance_km
+            )
+            
             top_3_data.append({
                 "id": r.id,
                 "donor_id": r.donor_id,
                 "donor_name": dp.full_name if dp else "Donor",
                 "donor_phone": dp.phone if dp else "",
+                "donor_whatsapp": dp.whatsapp_number if dp else "",
                 "status": r.status,
-                "distance_km": r.distance_km,
-                "eta_minutes": r.eta_minutes
+                "distance_km": dist,
+                "eta_minutes": r.eta_minutes,
+                "avg_rating": round(avg_rating, 1) if avg_rating else None,
+                "total_donations": total_donations,
+                "acceptance_rate": acceptance_rate
             })
             
         return {
@@ -978,16 +1241,30 @@ class DonationUseCases:
 
     async def confirm_top3_and_get_details(self, request_id: str, hospital_id: str, response_ids: List[str]) -> List[dict]:
         confirmed = await self.confirm_all_top_3(request_id, hospital_id, response_ids)
+        hospital_profile = await self.hospital_repo.get_by_user_id(hospital_id)
+        br = await self.request_repo.get_by_id(request_id)
+        
         confirmed_data = []
         for r in confirmed:
             dp = await self.donor_repo.get_by_user_id(r.donor_id)
+            dist = self._resolve_and_calculate_distance(
+                br_lat=br.hospital_latitude if br else None,
+                br_lng=br.hospital_longitude if br else None,
+                r_lat=r.donor_latitude,
+                r_lng=r.donor_longitude,
+                hp_lat=hospital_profile.latitude if hospital_profile else None,
+                hp_lng=hospital_profile.longitude if hospital_profile else None,
+                dp_lat=dp.latitude if dp else None,
+                dp_lng=dp.longitude if dp else None,
+                stored_distance=r.distance_km
+            )
             confirmed_data.append({
                 "id": r.id,
                 "donor_id": r.donor_id,
                 "donor_name": dp.full_name if dp else "Donor",
                 "donor_phone": dp.phone if dp else "",
                 "status": r.status,
-                "distance_km": r.distance_km,
+                "distance_km": dist,
                 "eta_minutes": r.eta_minutes
             })
         return confirmed_data
@@ -1017,6 +1294,19 @@ class DonationUseCases:
     async def map_response_to_donor_view(self, r: DonationResponse) -> dict:
         br = await self.request_repo.get_by_id(r.request_id)
         hp = await self.hospital_repo.get_by_user_id(br.hospital_id) if br else None
+        dp = await self.donor_repo.get_by_user_id(r.donor_id)
+        
+        dist = self._resolve_and_calculate_distance(
+            br_lat=br.hospital_latitude if br else None,
+            br_lng=br.hospital_longitude if br else None,
+            r_lat=r.donor_latitude,
+            r_lng=r.donor_longitude,
+            hp_lat=hp.latitude if hp else None,
+            hp_lng=hp.longitude if hp else None,
+            dp_lat=dp.latitude if dp else None,
+            dp_lng=dp.longitude if dp else None,
+            stored_distance=r.distance_km
+        )
         
         via_ward = False
         ward_member_name = None
@@ -1026,14 +1316,25 @@ class DonationUseCases:
             via_ward = True
             target_ward_id = br.target_ward_id
             if target_ward_id:
+                # Hospital explicitly selected a ward when creating the request.
+                # Show the first verified member of that ward.
                 wms = await self.ward_member_repo.get_verified_members_by_ward(target_ward_id)
                 if wms:
                     ward_member_name = wms[0].full_name
                     ward_member_phone = wms[0].phone
             else:
+                # No ward was pre-selected; look up the WardBloodAlert that was
+                # created when the background notification task ran.
                 alert = await self.ward_alert_repo.get_by_blood_request_id(br.id)
                 if alert:
                     wm = await self.ward_member_repo.get_by_id(alert.ward_member_id)
+                    if wm:
+                        ward_member_name = wm.full_name
+                        ward_member_phone = wm.phone
+                
+                # If still not found, check if the donor has an assigned ward_member_id
+                if not ward_member_name and dp and dp.ward_member_id:
+                    wm = await self.ward_member_repo.get_by_id(dp.ward_member_id)
                     if wm:
                         ward_member_name = wm.full_name
                         ward_member_phone = wm.phone
@@ -1044,7 +1345,7 @@ class DonationUseCases:
             "donor_id": r.donor_id,
             "status": r.status,
             "eta_minutes": r.eta_minutes,
-            "distance_km": r.distance_km,
+            "distance_km": dist,
             "blood_group": br.blood_group if br else "",
             "units_needed": br.units_needed if br else 1,
             "urgency": br.urgency if br else "normal",
@@ -1119,6 +1420,7 @@ class DonationUseCases:
 
     async def get_hospital_dashboard_formatted(self, hospital_id: str) -> dict:
         data = await self.get_hospital_dashboard(hospital_id)
+        hospital_profile = await self.hospital_repo.get_by_user_id(hospital_id)
         
         formatted_active = []
         for item in data["active_requests"]:
@@ -1129,26 +1431,61 @@ class DonationUseCases:
             top_3_list = []
             for r in top_3:
                 dp = await self.donor_repo.get_by_user_id(r.donor_id)
+                avg_rating = await self.rating_repo.get_avg_rating_for_donor(r.donor_id)
+                total_donations = await self.record_repo.count_by_donor(r.donor_id)
+                all_resps = await self.response_repo.list_history_for_donor(r.donor_id)
+                responded = [x for x in all_resps if x.status in ("accepted", "confirmed", "completed", "rejected")]
+                accepted = [x for x in responded if x.status in ("accepted", "confirmed", "completed")]
+                acceptance_rate = int(len(accepted) / len(responded) * 100) if responded else 0
+                
+                dist = self._resolve_and_calculate_distance(
+                    br_lat=br.hospital_latitude,
+                    br_lng=br.hospital_longitude,
+                    r_lat=r.donor_latitude,
+                    r_lng=r.donor_longitude,
+                    hp_lat=hospital_profile.latitude if hospital_profile else None,
+                    hp_lng=hospital_profile.longitude if hospital_profile else None,
+                    dp_lat=dp.latitude if dp else None,
+                    dp_lng=dp.longitude if dp else None,
+                    stored_distance=r.distance_km
+                )
+                
                 top_3_list.append({
                     "id": r.id,
                     "donor_id": r.donor_id,
                     "donor_name": dp.full_name if dp else "Donor",
                     "donor_phone": dp.phone if dp else "",
+                    "donor_whatsapp": dp.whatsapp_number if dp else "",
                     "status": r.status,
-                    "distance_km": r.distance_km,
-                    "eta_minutes": r.eta_minutes
+                    "distance_km": dist,
+                    "eta_minutes": r.eta_minutes,
+                    "avg_rating": round(avg_rating, 1) if avg_rating else None,
+                    "total_donations": total_donations,
+                    "acceptance_rate": acceptance_rate
                 })
                 
             confirmed_list = []
             for r in confirmed_donors:
                 dp = await self.donor_repo.get_by_user_id(r.donor_id)
+                dist = self._resolve_and_calculate_distance(
+                    br_lat=br.hospital_latitude,
+                    br_lng=br.hospital_longitude,
+                    r_lat=r.donor_latitude,
+                    r_lng=r.donor_longitude,
+                    hp_lat=hospital_profile.latitude if hospital_profile else None,
+                    hp_lng=hospital_profile.longitude if hospital_profile else None,
+                    dp_lat=dp.latitude if dp else None,
+                    dp_lng=dp.longitude if dp else None,
+                    stored_distance=r.distance_km
+                )
                 confirmed_list.append({
                     "id": r.id,
                     "donor_id": r.donor_id,
                     "donor_name": dp.full_name if dp else "Donor",
                     "donor_phone": dp.phone if dp else "",
+                    "donor_whatsapp": dp.whatsapp_number if dp else "",
                     "status": r.status,
-                    "distance_km": r.distance_km,
+                    "distance_km": dist,
                     "eta_minutes": r.eta_minutes
                 })
                 

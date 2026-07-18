@@ -72,9 +72,21 @@ def get_notif_repository() -> MongoNotificationRepository:
 def get_auth_use_cases(
     user_repo: MongoUserRepository = Depends(get_user_repository),
     hospital_repo: MongoHospitalProfileRepository = Depends(get_hospital_repository),
-    donor_repo: MongoDonorProfileRepository = Depends(get_donor_repository)
+    donor_repo: MongoDonorProfileRepository = Depends(get_donor_repository),
+    request_repo: MongoBloodRequestRepository = Depends(get_request_repository),
+    response_repo: MongoDonationResponseRepository = Depends(get_response_repository),
+    ward_repo: MongoWardRepository = Depends(get_ward_repository),
+    ward_member_repo: MongoWardMemberRepository = Depends(get_ward_member_repository)
 ) -> AuthUseCases:
-    return AuthUseCases(user_repo, hospital_repo, donor_repo)
+    return AuthUseCases(
+        user_repo=user_repo,
+        hospital_repo=hospital_repo,
+        donor_repo=donor_repo,
+        request_repo=request_repo,
+        response_repo=response_repo,
+        ward_repo=ward_repo,
+        ward_member_repo=ward_member_repo
+    )
 
 def get_donation_use_cases(
     user_repo: MongoUserRepository = Depends(get_user_repository),

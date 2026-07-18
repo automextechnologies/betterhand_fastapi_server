@@ -79,8 +79,99 @@ async def admin_broadcast_notification(
         return {"status": "error", "message": f"Broadcast failed: {str(e)}"}
 
 
+@app.post("/admin/verify-ward-member/{member_id}")
+async def admin_verify_ward_member(
+    member_id: str,
+    admin_use_cases: AdminUseCases = Depends(get_admin_use_cases)
+):
+    """Admin-only endpoint: verify a ward member account so they become active."""
+    try:
+        return await admin_use_cases.verify_ward_member(member_id)
+    except ValueError as e:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error verifying ward member: {e}")
+        return {"status": "error", "message": f"Verification failed: {str(e)}"}
+
+
+@app.get("/admin/debug/ward-search")
+async def debug_ward_search(
+    state: str = "",
+    district: str = "",
+    local_body_name: str = "",
+    local_body_type: str = "",
+    ward_number: str = "",
+):
+    """
+    Debug endpoint: shows raw ward + ward_member docs from MongoDB
+    so mismatches between stored values and search values can be spotted.
+    Visit: /admin/debug/ward-search?district=Ernakulam&ward_number=4
+    """
+    import re
+    from app.infrastructure.database.mongodb import db as mongo_db
+
+    query = {}
+    for field, val in [
+        ("state", state),
+        ("district", district),
+        ("local_body_name", local_body_name),
+        ("local_body_type", local_body_type),
+        ("ward_number", ward_number),
+    ]:
+        if val:
+            query[field] = {"$regex": f"^{re.escape(val)}$", "$options": "i"}
+
+    ward_docs = await mongo_db.db.wards.find(query).to_list(length=50)
+
+    wards_out = []
+    for w in ward_docs:
+        ward_id = w["_id"]
+        members_raw = await mongo_db.db.ward_members.find(
+            {"ward_id": {"$in": [ward_id, str(ward_id)]}}
+        ).to_list(length=20)
+        members_out = [
+            {
+                "_id": str(m["_id"]),
+                "full_name": m.get("full_name", ""),
+                "phone": m.get("phone", ""),
+                "is_verified": m.get("is_verified", False),
+                "ward_id_in_doc": str(m.get("ward_id", "")),
+                "ward_id_matches": str(m.get("ward_id", "")) == str(ward_id),
+            }
+            for m in members_raw
+        ]
+        wards_out.append({
+            "ward_id": str(ward_id),
+            "ward_number": w.get("ward_number", ""),
+            "local_body_name": w.get("local_body_name", ""),
+            "local_body_type": w.get("local_body_type", ""),
+            "district": w.get("district", ""),
+            "state": w.get("state", ""),
+            "members": members_out,
+        })
+
+    all_verified = await mongo_db.db.ward_members.find(
+        {"is_verified": True}
+    ).to_list(length=200)
+    verified_out = [
+        {
+            "_id": str(m["_id"]),
+            "full_name": m.get("full_name", ""),
+            "is_verified": m.get("is_verified", False),
+            "ward_id": str(m.get("ward_id", "")),
+        }
+        for m in all_verified
+    ]
+
+    return {
+        "filters_applied": query,
+        "wards_matched_by_location": wards_out,
+        "all_verified_ward_members": verified_out,
+    }
+
+
 @app.get("/admin", response_class=HTMLResponse)
-@app.get("/admi", response_class=HTMLResponse)
 async def admin_dashboard(admin_use_cases: AdminUseCases = Depends(get_admin_use_cases)):
     try:
         data = await admin_use_cases.get_admin_dashboard_data()
@@ -181,10 +272,17 @@ async def admin_dashboard(admin_use_cases: AdminUseCases = Depends(get_admin_use
         wid = str(wm.ward_id or "")
         w_info = ward_map.get(wid)
         ward_display = f"Ward {w_info.ward_number or 'N/A'} ({w_info.local_body_name or 'N/A'})" if w_info else "N/A"
-        
-        v_badge = '<span class="px-2.5 py-0.5 text-xs font-semibold rounded-full bg-blue-100 text-blue-800">Verified</span>' if wm.is_verified else '<span class="px-2.5 py-0.5 text-xs font-semibold rounded-full bg-amber-100 text-amber-800">Unverified</span>'
+        member_id = str(wm.id or "")
+
+        if wm.is_verified:
+            v_badge = f'<span id="badge-{member_id}" class="px-2.5 py-0.5 text-xs font-semibold rounded-full bg-blue-100 text-blue-800">Verified</span>'
+            verify_btn = ''
+        else:
+            v_badge = f'<span id="badge-{member_id}" class="px-2.5 py-0.5 text-xs font-semibold rounded-full bg-amber-100 text-amber-800">Unverified</span>'
+            verify_btn = f'<button id="vbtn-{member_id}" onclick="verifyWardMember(\'{member_id}\')" class="ml-2 px-3 py-1 bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white text-xs font-semibold rounded-lg shadow-sm hover:shadow transition-all">Verify</button>'
+
         push_badge = '<span class="px-2.5 py-0.5 text-xs font-semibold rounded-full bg-emerald-100 text-emerald-800">Enabled</span>' if fcm else '<span class="px-2.5 py-0.5 text-xs font-semibold rounded-full bg-slate-100 text-slate-500">Disabled</span>'
-        
+
         ward_member_rows += f"""
         <tr class="hover:bg-slate-50 transition-colors border-b border-slate-100 search-row" data-search="{wm.full_name or ''} {email} {wm.phone or ''} {ward_display}">
             <td class="px-6 py-4 text-sm text-slate-500 font-medium">{i}</td>
@@ -193,7 +291,12 @@ async def admin_dashboard(admin_use_cases: AdminUseCases = Depends(get_admin_use
             <td class="px-6 py-4 text-sm text-slate-600">{wm.phone or 'N/A'}</td>
             <td class="px-6 py-4 text-sm text-slate-600">{wm.designation or 'N/A'}</td>
             <td class="px-6 py-4 text-sm text-slate-600">{ward_display}</td>
-            <td class="px-6 py-4 text-sm">{v_badge}</td>
+            <td class="px-6 py-4 text-sm">
+                <div class="flex items-center gap-1 flex-wrap">
+                    {v_badge}
+                    {verify_btn}
+                </div>
+            </td>
             <td class="px-6 py-4 text-sm text-center">{push_badge}</td>
         </tr>
         """
@@ -204,7 +307,7 @@ async def admin_dashboard(admin_use_cases: AdminUseCases = Depends(get_admin_use
     if not donor_rows:
         donor_rows = '<tr><td colspan="7" class="px-6 py-8 text-center text-sm text-slate-400">No registered donors found.</td></tr>'
     if not ward_member_rows:
-        ward_member_rows = '<tr><td colspan="8" class="px-6 py-8 text-center text-sm text-slate-400">No registered ward members found.</td></tr>'
+        ward_member_rows = '<tr><td colspan="9" class="px-6 py-8 text-center text-sm text-slate-400">No registered ward members found.</td></tr>'
 
     html_content = f"""
     <!DOCTYPE html>
@@ -465,6 +568,42 @@ async def admin_dashboard(admin_use_cases: AdminUseCases = Depends(get_admin_use
                         row.classList.add('hidden');
                     }}
                 }});
+            }}
+
+            async function verifyWardMember(memberId) {{
+                const btn = document.getElementById('vbtn-' + memberId);
+                const badge = document.getElementById('badge-' + memberId);
+                if (btn) {{
+                    btn.disabled = true;
+                    btn.innerText = 'Verifying...';
+                    btn.classList.add('opacity-50', 'cursor-not-allowed');
+                }}
+                try {{
+                    const response = await fetch('/admin/verify-ward-member/' + memberId, {{ method: 'POST' }});
+                    const result = await response.json();
+                    if (result.status === 'success' || result.status === 'already_verified') {{
+                        if (badge) {{
+                            badge.className = 'px-2.5 py-0.5 text-xs font-semibold rounded-full bg-blue-100 text-blue-800';
+                            badge.innerText = 'Verified';
+                        }}
+                        if (btn) btn.remove();
+                        alert('✅ ' + result.message);
+                    }} else {{
+                        alert('❌ ' + (result.message || result.detail || 'Verification failed.'));
+                        if (btn) {{
+                            btn.disabled = false;
+                            btn.innerText = 'Verify';
+                            btn.classList.remove('opacity-50', 'cursor-not-allowed');
+                        }}
+                    }}
+                }} catch (error) {{
+                    alert('Network error. Could not verify ward member.');
+                    if (btn) {{
+                        btn.disabled = false;
+                        btn.innerText = 'Verify';
+                        btn.classList.remove('opacity-50', 'cursor-not-allowed');
+                    }}
+                }}
             }}
 
             async function sendBroadcast() {{

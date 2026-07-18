@@ -490,8 +490,8 @@ class MongoDonationResponseRepository(DonationResponseRepository):
     async def get_by_request_and_donor(self, request_id: str, donor_id: str) -> Optional[DonationResponse]:
         try:
             doc = await db.db.donation_responses.find_one({
-                "request_id": ObjectId(request_id),
-                "donor_id": ObjectId(donor_id)
+                "request_id": {"$in": [ObjectId(request_id), str(request_id)]},
+                "donor_id": {"$in": [ObjectId(donor_id), str(donor_id)]}
             })
             return map_response_to_entity(doc) if doc else None
         except Exception:

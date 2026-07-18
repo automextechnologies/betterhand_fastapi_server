@@ -59,7 +59,15 @@ async def run_tests():
     camp_reg_repo = get_camp_reg_repository()
     notif_repo = get_notif_repository()
     
-    auth_use_cases = AuthUseCases(user_repo, hospital_repo, donor_repo)
+    auth_use_cases = AuthUseCases(
+        user_repo=user_repo,
+        hospital_repo=hospital_repo,
+        donor_repo=donor_repo,
+        request_repo=request_repo,
+        response_repo=response_repo,
+        ward_repo=ward_repo,
+        ward_member_repo=ward_member_repo
+    )
     donation_use_cases = DonationUseCases(
         user_repo=user_repo,
         hospital_repo=hospital_repo,
@@ -338,6 +346,133 @@ async def run_tests():
         cooldown_status = await db.db.donation_records.find_one({"donor_id": ObjectId(donor_a.id)})
         assert cooldown_status["cooldown_until"] > datetime.utcnow()
         logger.info("Donation Completion & Cooldown verification PASSED.")
+        
+        # 11. Ward-Donor Mapping Verification
+        logger.info("Test Step 11: Verifying Ward-Donor Mapping Logic...")
+        # Scenario 1: Register Ward Member first, then Register matching Donor
+        # We already have a ward created: ward_id (Test Panchayat, ward 12, district Ernakulam, local body type panchayat)
+        # We already have a registered ward member for it: wm_user
+        # Let's get the ward member profile
+        wm_profile = await ward_member_repo.get_by_user_id(wm_user.id)
+        assert wm_profile is not None
+        
+        # Register a new matching donor
+        d_map_dto = DonorRegisterDTO(
+            password="donorpassword123",
+            full_name="Donor Map 11",
+            blood_group="B+",
+            phone="+919988776611",
+            age=26,
+            gender="M",
+            address="Mapping St",
+            state="Kerala",
+            district="Ernakulam",
+            local_body_type="panchayat",
+            local_body_name="Test Panchayat",
+            ward_number="12",
+            city="Kochi",
+            pincode="682011",
+            whatsapp_number="+919988776611",
+            is_student=False,
+            q_weight_ok=True,
+            q_age_ok=True,
+            q_no_illness=True,
+            q_no_medication=True,
+            q_no_recent_donation=True,
+            q_no_tattoo=True,
+            q_no_alcohol=True,
+            consent_given=True
+        )
+        donor_mapped = await auth_use_cases.register_donor(d_map_dto)
+        assert donor_mapped.id is not None
+        
+        # Verify donor profile has ward_member_id assigned
+        donor_mapped_profile = await donor_repo.get_by_user_id(donor_mapped.id)
+        assert donor_mapped_profile is not None
+        assert donor_mapped_profile.ward_member_id == wm_profile.id
+        logger.info("Ward-Donor Mapping Scenario 1 (Ward Member registered first) PASSED.")
+
+        # Verify that the ward member is shown when the blood request enabled the ward member alert
+        from app.domain.entities.donation import BloodRequest, DonationResponse
+        br_map = BloodRequest(
+            hospital_id=h_user.id,
+            blood_group="B+",
+            units_needed=1,
+            urgency="normal",
+            notify_ward_members=True
+        )
+        br_map = await request_repo.create(br_map)
+        
+        resp_map, _ = await response_repo.get_or_create(
+            request_id=br_map.id,
+            donor_id=donor_mapped.id,
+            defaults={"status": "pending"}
+        )
+        
+        view_map = await donation_use_cases.map_response_to_donor_view(resp_map)
+        assert view_map["via_ward"] is True
+        assert view_map["ward_member_name"] == wm_profile.full_name
+        assert view_map["ward_member_phone"] == wm_profile.phone
+        logger.info("Ward Member shown when blood request enabled the ward member alert PASSED.")
+
+        # Scenario 2: Register Donor first, then Register matching Ward Member
+        # Register a donor for a new ward (Malappuram, municipality, Kondotty Municipality, ward 15)
+        d_map_dto2 = DonorRegisterDTO(
+            password="donorpassword123",
+            full_name="Donor Map 12",
+            blood_group="B+",
+            phone="+919988776622",
+            age=26,
+            gender="F",
+            address="Mapping St 2",
+            state="Kerala",
+            district="Malappuram",
+            local_body_type="municipality",
+            local_body_name="Kondotty Municipality",
+            ward_number="15",
+            city="Kondotty",
+            pincode="673638",
+            whatsapp_number="+919988776622",
+            is_student=False,
+            q_weight_ok=True,
+            q_age_ok=True,
+            q_no_illness=True,
+            q_no_medication=True,
+            q_no_recent_donation=True,
+            q_no_tattoo=True,
+            q_no_alcohol=True,
+            consent_given=True
+        )
+        donor_mapped2 = await auth_use_cases.register_donor(d_map_dto2)
+        assert donor_mapped2.id is not None
+        
+        donor_mapped2_profile = await donor_repo.get_by_user_id(donor_mapped2.id)
+        assert donor_mapped2_profile is not None
+        assert donor_mapped2_profile.ward_member_id is None
+        
+        # Now register matching ward member
+        wm_dto2 = WardMemberRegisterDTO(
+            password="wardmember123",
+            full_name="Ward Member 2",
+            phone="+919876500002",
+            designation="Ward Member",
+            state="Kerala",
+            district="Malappuram",
+            local_body_type="municipality",
+            local_body_name="Kondotty Municipality",
+            ward_number="15"
+        )
+        wm_user2 = await ward_use_cases.register_ward_member(wm_dto2)
+        assert wm_user2.id is not None
+        
+        wm_profile2 = await ward_member_repo.get_by_user_id(wm_user2.id)
+        assert wm_profile2 is not None
+        
+        # Verify donor profile now has ward_member_id assigned
+        donor_mapped2_profile_after = await donor_repo.get_by_user_id(donor_mapped2.id)
+        assert donor_mapped2_profile_after is not None
+        assert donor_mapped2_profile_after.ward_member_id == wm_profile2.id
+        logger.info("Ward-Donor Mapping Scenario 2 (Donor registered first) PASSED.")
         
         logger.info("🏆 ALL INTEGRATION TESTS PASSED SUCCESSFULLY! 🏆")
         

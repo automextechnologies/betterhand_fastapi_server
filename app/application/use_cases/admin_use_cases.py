@@ -45,3 +45,55 @@ class AdminUseCases:
             body=body
         )
         return {"status": "success", "message": f"Broadcast notification sent successfully to {len(tokens)} user(s)."}
+
+    async def verify_ward_member(self, member_id: str) -> dict:
+        """
+        Mark a ward member as verified by an administrator.
+
+        This is a privileged action performed exclusively from the admin dashboard.
+        The ward member's `is_verified` flag is flipped to True and persisted.
+        A push notification is sent to the ward member's device if an FCM token
+        exists, so they are immediately informed without needing to refresh.
+
+        Args:
+            member_id: The WardMember document ID (not the User ID).
+
+        Returns:
+            A dict confirming the action with the member's name.
+
+        Raises:
+            ValueError: If the member is not found.
+        """
+        member = await self.ward_member_repo.get_by_id(member_id)
+        if not member:
+            raise ValueError(f"Ward member with id '{member_id}' not found.")
+
+        if member.is_verified:
+            return {
+                "status": "already_verified",
+                "message": f"{member.full_name} is already verified.",
+                "member_id": member_id
+            }
+
+        member.is_verified = True
+        await self.ward_member_repo.update(member)
+
+        # Notify the ward member via push if they have an FCM token
+        if member.user_id:
+            user = await self.user_repo.get_by_id(member.user_id)
+            if user and user.fcm_token:
+                try:
+                    send_push_to_many(
+                        fcm_tokens=[user.fcm_token],
+                        title="✅ Account Verified",
+                        body="Your ward member account has been verified by the administrator. You can now manage donors and broadcast alerts."
+                    )
+                except Exception:
+                    pass  # Notification failure must not block the verification action
+
+        return {
+            "status": "success",
+            "message": f"{member.full_name} has been verified successfully.",
+            "member_id": member_id,
+            "full_name": member.full_name
+        }

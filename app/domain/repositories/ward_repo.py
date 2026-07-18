@@ -94,3 +94,7 @@ class WardDonorNotificationRepository(ABC):
     @abstractmethod
     async def list_by_alert(self, alert_id: str) -> List[WardDonorNotification]:
         pass
+
+    @abstractmethod
+    async def update(self, notif: WardDonorNotification) -> WardDonorNotification:
+        pass

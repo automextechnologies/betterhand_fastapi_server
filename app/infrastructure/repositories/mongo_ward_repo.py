@@ -195,20 +195,41 @@ class MongoWardRepository(WardRepository):
     async def search_wards(self, filters: dict, has_member: bool = False) -> List[Ward]:
         query = {}
         for k, v in filters.items():
+            clean_key = k.replace("ward__", "")
             if v:
                 if isinstance(v, str):
-                    query[k] = {"$regex": f"^{v}$", "$options": "i"}
+                    query[clean_key] = {"$regex": f"^{v}$", "$options": "i"}
                 else:
-                    query[k] = v
-                    
-        # If we need wards that have registered verified members
+                    query[clean_key] = v
+
+        # Optionally restrict results to wards that have at least one
+        # registered ward member.
         if has_member:
-            verified_members = await db.db.ward_members.find({"is_verified": True}).to_list(length=1000)
-            ward_ids = list(set([ObjectId(m["ward_id"]) for m in verified_members if "ward_id" in m]))
-            query["_id"] = {"$in": ward_ids}
-            
+            registered_members = await db.db.ward_members.find(
+                {}
+            ).to_list(length=1000)
+
+            ward_ids = []
+            for m in registered_members:
+                raw = m.get("ward_id")
+                if raw is None:
+                    continue
+                try:
+                    ward_ids.append(raw if isinstance(raw, ObjectId) else ObjectId(raw))
+                except Exception:
+                    continue
+
+            ward_ids = list(set(ward_ids))
+
+            if ward_ids:
+                query["_id"] = {"$in": ward_ids}
+            else:
+                # No members exist — return empty immediately.
+                return []
+
         docs = await db.db.wards.find(query).to_list(length=200)
         return [map_ward_to_entity(doc) for doc in docs]
+
 
     async def list_all(self) -> List[Ward]:
         docs = await db.db.wards.find({}).to_list(length=10000)
@@ -242,9 +263,12 @@ class MongoWardMemberRepository(WardMemberRepository):
         return member
 
     async def get_verified_members_by_ward(self, ward_id: str) -> List[WardMember]:
+        if not ward_id:
+            return []
         try:
+            oid = ObjectId(ward_id) if not isinstance(ward_id, ObjectId) else ward_id
             docs = await db.db.ward_members.find({
-                "ward_id": ObjectId(ward_id),
+                "ward_id": {"$in": [oid, str(oid)]},
                 "is_verified": True
             }).to_list(length=100)
             return [map_ward_member_to_entity(doc) for doc in docs]
@@ -264,8 +288,13 @@ class MongoWardMemberRepository(WardMemberRepository):
         return [map_ward_member_to_entity(doc) for doc in docs]
 
     async def get_members_by_ward(self, ward_id: str) -> List[WardMember]:
+        if not ward_id:
+            return []
         try:
-            docs = await db.db.ward_members.find({"ward_id": ObjectId(ward_id)}).to_list(length=100)
+            oid = ObjectId(ward_id) if not isinstance(ward_id, ObjectId) else ward_id
+            docs = await db.db.ward_members.find({
+                "ward_id": {"$in": [oid, str(oid)]}
+            }).to_list(length=100)
             return [map_ward_member_to_entity(doc) for doc in docs]
         except Exception:
             return []
@@ -369,3 +398,8 @@ class MongoWardDonorNotificationRepository(WardDonorNotificationRepository):
     async def list_by_alert(self, alert_id: str) -> List[WardDonorNotification]:
         docs = await db.db.ward_donor_notifications.find({"alert_id": ObjectId(alert_id)}).sort("created_at", -1).to_list(length=1000)
         return [map_notif_to_entity(doc) for doc in docs]
+
+    async def update(self, notif: WardDonorNotification) -> WardDonorNotification:
+        doc = map_notif_to_db(notif)
+        await db.db.ward_donor_notifications.replace_one({"_id": ObjectId(notif.id)}, doc)
+        return notif

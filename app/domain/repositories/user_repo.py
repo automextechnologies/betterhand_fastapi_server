@@ -106,7 +106,8 @@ class DonorProfileRepository(ABC):
         ward_number: str,
         is_available: Optional[bool] = None,
         user_ids: Optional[List[str]] = None,
-        blood_group: Optional[str] = None
+        blood_group: Optional[str] = None,
+        ward_member_id: Optional[str] = None
     ) -> List[DonorProfile]:
         pass
 
@@ -119,3 +120,14 @@ class DonorProfileRepository(ABC):
         is_available: Optional[bool] = None
     ) -> int:
         pass
+
+    @abstractmethod
+    async def list_by_ward_mapping(
+        self,
+        district: str,
+        local_body_type: str,
+        local_body_name: str,
+        ward_number: str
+    ) -> List[DonorProfile]:
+        pass
+

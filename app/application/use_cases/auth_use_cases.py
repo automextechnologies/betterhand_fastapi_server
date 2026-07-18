@@ -3,6 +3,8 @@ from typing import Optional, Tuple
 from app.core.security import hash_password, verify_password, create_access_token, create_refresh_token
 from app.domain.entities.user import User, HospitalProfile, DonorProfile, DonorQuestionnaire
 from app.domain.repositories.user_repo import UserRepository, HospitalProfileRepository, DonorProfileRepository
+from app.domain.repositories.donation_repo import BloodRequestRepository, DonationResponseRepository
+from app.domain.repositories.ward_repo import WardRepository, WardMemberRepository
 from app.application.dto.auth_dto import (
     HospitalRegisterDTO, DonorRegisterDTO, LoginDTO, TokenResponse,
     ChangePasswordDTO, UpdateLocationDTO
@@ -13,11 +15,19 @@ class AuthUseCases:
         self,
         user_repo: UserRepository,
         hospital_repo: HospitalProfileRepository,
-        donor_repo: DonorProfileRepository
+        donor_repo: DonorProfileRepository,
+        request_repo: Optional[BloodRequestRepository] = None,
+        response_repo: Optional[DonationResponseRepository] = None,
+        ward_repo: Optional[WardRepository] = None,
+        ward_member_repo: Optional[WardMemberRepository] = None
     ):
         self.user_repo = user_repo
         self.hospital_repo = hospital_repo
         self.donor_repo = donor_repo
+        self.request_repo = request_repo
+        self.response_repo = response_repo
+        self.ward_repo = ward_repo
+        self.ward_member_repo = ward_member_repo
 
     async def register_hospital(self, dto: HospitalRegisterDTO) -> User:
         # Check if email is already taken
@@ -90,6 +100,23 @@ class AuthUseCases:
             college_district=dto.college_district,
             questionnaire=DonorQuestionnaire()
         )
+        
+        # Check ward member by mapping district, local body type, local body name, and ward number
+        if self.ward_repo and self.ward_member_repo and profile.district and profile.local_body_type and profile.local_body_name and profile.ward_number:
+            wards = await self.ward_repo.search_wards({
+                "district": profile.district,
+                "local_body_type": profile.local_body_type,
+                "local_body_name": profile.local_body_name,
+                "ward_number": profile.ward_number
+            })
+            if wards:
+                members = await self.ward_member_repo.get_verified_members_by_ward(wards[0].id)
+                if not members:
+                    # fallback to unverified members if no verified ones are registered
+                    members = await self.ward_member_repo.get_members_by_ward(wards[0].id)
+                if members:
+                    profile.ward_member_id = members[0].id
+
         await self.donor_repo.create(profile)
         return created_user
 
@@ -150,6 +177,36 @@ class AuthUseCases:
             profile.latitude = dto.latitude
             profile.longitude = dto.longitude
             await self.hospital_repo.update(profile)
+            
+            # Synchronize active blood requests and recalculate response distances
+            if self.request_repo and self.response_repo:
+                from app.domain.services.location import haversine_distance
+                requests = await self.request_repo.list_by_hospital(user_id)
+                for br in requests:
+                    if br.status in ("pending", "active", "confirmed"):
+                        br.hospital_latitude = dto.latitude
+                        br.hospital_longitude = dto.longitude
+                        await self.request_repo.update(br)
+                        
+                        responses = await self.response_repo.list_by_request(br.id)
+                        for resp in responses:
+                            lat = resp.donor_latitude
+                            lng = resp.donor_longitude
+                            if lat is None or lng is None:
+                                dp = await self.donor_repo.get_by_user_id(resp.donor_id)
+                                if dp:
+                                    lat = dp.latitude
+                                    lng = dp.longitude
+                            
+                            if lat is not None and lng is not None:
+                                try:
+                                    resp.distance_km = round(haversine_distance(
+                                        dto.latitude, dto.longitude,
+                                        lat, lng
+                                    ), 2)
+                                    await self.response_repo.update(resp)
+                                except Exception:
+                                    pass
         else:
             raise ValueError("Unsupported role for location updates.")
 

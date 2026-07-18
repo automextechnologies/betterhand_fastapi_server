@@ -76,6 +76,7 @@ class DonorProfile:
     is_student: bool = False
     college_name: str = ""
     college_district: str = ""
+    ward_member_id: Optional[str] = None
     questionnaire: DonorQuestionnaire = field(default_factory=DonorQuestionnaire)
     created_at: datetime = field(default_factory=datetime.utcnow)
     updated_at: datetime = field(default_factory=datetime.utcnow)

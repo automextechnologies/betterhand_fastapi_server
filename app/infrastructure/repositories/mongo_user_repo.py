@@ -161,6 +161,7 @@ def map_donor_to_entity(doc: dict) -> DonorProfile:
         is_student=doc.get("is_student", False),
         college_name=doc.get("college_name", ""),
         college_district=doc.get("college_district", ""),
+        ward_member_id=str(doc.get("ward_member_id")) if doc.get("ward_member_id") else None,
         questionnaire=questionnaire,
         created_at=doc.get("created_at", datetime.utcnow()),
         updated_at=doc.get("updated_at", datetime.utcnow())
@@ -192,6 +193,7 @@ def map_donor_to_db(entity: DonorProfile) -> dict:
         "is_student": entity.is_student,
         "college_name": entity.college_name,
         "college_district": entity.college_district,
+        "ward_member_id": ObjectId(entity.ward_member_id) if entity.ward_member_id else None,
         "questionnaire": {
             "questionnaire_completed": entity.questionnaire.questionnaire_completed,
             "q_weight_ok": entity.questionnaire.q_weight_ok,
@@ -422,21 +424,45 @@ class MongoDonorProfileRepository(DonorProfileRepository):
         ward_number: str,
         is_available: Optional[bool] = None,
         user_ids: Optional[List[str]] = None,
-        blood_group: Optional[str] = None
+        blood_group: Optional[str] = None,
+        ward_member_id: Optional[str] = None
     ) -> List[DonorProfile]:
         import re
-        query = {
+        location_clause = {
             "state": {"$regex": f"^{re.escape(state)}$", "$options": "i"},
             "local_body_name": {"$regex": f"^{re.escape(local_body_name)}$", "$options": "i"},
             "ward_number": str(ward_number)
         }
+        
+        clauses = []
+        if ward_member_id:
+            try:
+                member_oid = ObjectId(ward_member_id) if not isinstance(ward_member_id, ObjectId) else ward_member_id
+                clauses.append({"$or": [
+                    {"ward_member_id": {"$in": [member_oid, str(member_oid)]}},
+                    location_clause
+                ]})
+            except Exception:
+                clauses.append(location_clause)
+        else:
+            clauses.append(location_clause)
+
         if is_available is not None:
-            query["is_available"] = is_available
+            clauses.append({"is_available": is_available})
         if user_ids is not None:
-            query["user_id"] = {"$in": [ObjectId(uid) for uid in user_ids]}
+            raw_ids = []
+            for uid in user_ids:
+                try:
+                    raw_ids.append(ObjectId(uid) if not isinstance(uid, ObjectId) else uid)
+                except Exception:
+                    pass
+                raw_ids.append(str(uid))
+            clauses.append({"user_id": {"$in": raw_ids}})
         if blood_group is not None:
             normalized_bg = blood_group.strip().upper().replace(" ", "+")
-            query["blood_group"] = {"$regex": f"^{re.escape(normalized_bg)}$", "$options": "i"}
+            clauses.append({"blood_group": {"$regex": f"^{re.escape(normalized_bg)}$", "$options": "i"}})
+            
+        query = {"$and": clauses} if len(clauses) > 1 else clauses[0]
             
         docs = await db.db.donor_profiles.find(query).to_list(length=1000)
         return [map_donor_to_entity(doc) for doc in docs]
@@ -457,3 +483,20 @@ class MongoDonorProfileRepository(DonorProfileRepository):
         if is_available is not None:
             query["is_available"] = is_available
         return await db.db.donor_profiles.count_documents(query)
+
+    async def list_by_ward_mapping(
+        self,
+        district: str,
+        local_body_type: str,
+        local_body_name: str,
+        ward_number: str
+    ) -> List[DonorProfile]:
+        import re
+        query = {
+            "district": {"$regex": f"^{re.escape(district.strip())}$", "$options": "i"},
+            "local_body_type": {"$regex": f"^{re.escape(local_body_type.strip())}$", "$options": "i"},
+            "local_body_name": {"$regex": f"^{re.escape(local_body_name.strip())}$", "$options": "i"},
+            "ward_number": {"$regex": f"^{re.escape(str(ward_number).strip())}$", "$options": "i"}
+        }
+        docs = await db.db.donor_profiles.find(query).to_list(length=1000)
+        return [map_donor_to_entity(doc) for doc in docs]

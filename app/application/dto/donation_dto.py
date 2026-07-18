@@ -120,6 +120,7 @@ class DonationResponseCreateDTO(BaseModel):
     donor_latitude: Optional[float] = None
     donor_longitude: Optional[float] = None
     rejection_reason: Optional[str] = ""
+    eta_minutes: Optional[int] = None
 
 # ─── DonationRecord DTOs ───
 class DonorRatingResponse(BaseModel):

@@ -32,7 +32,9 @@ class ConnectionManager:
             
         message = {
             "event": event_type,
-            "data": payload
+            "type": event_type,
+            "data": payload,
+            "payload": payload
         }
         
         # Make a copy of connections to prevent mutation during iteration

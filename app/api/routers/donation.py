@@ -425,10 +425,10 @@ async def get_notifications(
     notifs = await donation_use_cases.get_notifications(current_user.id)
     return [{
         "id": n.id,
-        "title": n.title,
+        "title": getattr(n, "title", getattr(n, "subject", "")),
         "body": n.body,
-        "data": n.data,
-        "is_read": n.is_read,
+        "data": getattr(n, "data", {}),
+        "is_read": getattr(n, "is_read", False),
         "created_at": n.created_at
     } for n in notifs]
 
